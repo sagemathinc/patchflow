@@ -4,6 +4,7 @@ module.exports = {
   parserOptions: {
     ecmaVersion: "latest",
     sourceType: "module",
+    warnOnUnsupportedTypeScriptVersion: false,
   },
   env: {
     es2020: true,

@@ -166,7 +166,7 @@ export class PatchGraph {
         last.patch &&
         patch.patch &&
         patch.time - last.time <= this.fileTimeDedupTolerance &&
-        List(patch.patch as any).equals(List(last.patch as any))
+        List<unknown>(patch.patch as unknown[]).equals(List<unknown>(last.patch as unknown[]))
       ) {
         ordered.splice(i, 1);
         i -= 1;

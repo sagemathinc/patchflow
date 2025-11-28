@@ -21,11 +21,11 @@ export interface Document {
   makePatch(other: Document): CompressedPatch;
   isEqual(other?: Document): boolean;
   toString(): string;
-  set(value: any): Document;
-  get(key?: any): any;
-  getOne?(key?: any): any;
-  delete?(key?: any): Document;
-  changes?(prev?: Document): any;
+  set(value: unknown): Document;
+  get(key?: unknown): unknown;
+  getOne?(key?: unknown): unknown;
+  delete?(key?: unknown): Document;
+  changes?(prev?: Document): unknown;
   count(): number;
 }
 

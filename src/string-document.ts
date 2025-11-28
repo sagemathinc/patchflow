@@ -24,18 +24,18 @@ export class StringDocument implements Document {
     return makePatch(this.value, other.value);
   }
 
-  public set(x: any): StringDocument {
+  public set(x: unknown): StringDocument {
     if (typeof x === "string") {
       return new StringDocument(x);
     }
     throw new Error("StringDocument.set expects a string");
   }
 
-  public get(_?: any): any {
+  public get(): never {
     throw new Error("get queries on strings are not supported");
   }
 
-  public delete(_?: any): StringDocument {
+  public delete(): never {
     throw new Error("delete on strings is not supported");
   }
 
