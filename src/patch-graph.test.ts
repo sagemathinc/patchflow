@@ -50,4 +50,17 @@ describe("PatchGraph with StringDocument", () => {
     ]);
     expect(graph.value().toString()).toBe("snappy");
   });
+
+  it("dedups identical file-load patches close in time", () => {
+    const graph = new PatchGraph({ codec });
+    const base = new StringDocument("");
+    const doc1 = new StringDocument("X");
+    const filePatch = base.makePatch(doc1);
+    graph.add([
+      { time: 1, patch: filePatch, parents: [], file: true },
+      { time: 2, patch: filePatch, parents: [], file: true },
+    ]);
+    expect(graph.version(1).toString()).toBe("X");
+    expect(graph.version(2).toString()).toBe("X");
+  });
 });
