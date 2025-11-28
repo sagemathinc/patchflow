@@ -40,3 +40,28 @@ export type PatchGraphValueOptions = {
   time?: number;
   withoutTimes?: number[];
 };
+
+// Optional metadata describing where a patch came from (e.g., transport id).
+export interface PatchEnvelope extends Patch {
+  source?: string;
+}
+
+export interface PatchStore {
+  loadInitial(opts?: { sinceTime?: number }): Promise<{
+    patches: PatchEnvelope[];
+    hasMore?: boolean;
+  }>;
+  append(envelope: PatchEnvelope): Promise<void>;
+  subscribe(onEnvelope: (env: PatchEnvelope) => void): () => void;
+}
+
+export interface FileAdapter {
+  read(): Promise<string>;
+  write(content: string, opts?: { base?: string }): Promise<void>;
+  watch?(onChange: (delta?: { patch?: CompressedPatch; seq?: number }) => void): () => void;
+}
+
+export interface PresenceAdapter {
+  publish(state: unknown): void;
+  subscribe(onState: (state: unknown, clientId: string) => void): () => void;
+}

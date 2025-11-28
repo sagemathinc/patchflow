@@ -1,26 +1,21 @@
 import { EventEmitter } from "events";
 import { PatchGraph } from "./patch-graph";
-import type { DocCodec, Document, Patch } from "./types";
-
-export interface PatchEnvelope extends Patch {
-  // Optional metadata describing where the patch came from (e.g., transport id).
-  source?: string;
-}
-
-export interface PatchStore {
-  loadInitial(opts?: { sinceTime?: number }): Promise<{
-    patches: PatchEnvelope[];
-    hasMore?: boolean;
-  }>;
-  append(envelope: PatchEnvelope): Promise<void>;
-  subscribe(onEnvelope: (env: PatchEnvelope) => void): () => void;
-}
+import type {
+  DocCodec,
+  Document,
+  PatchEnvelope,
+  PatchStore,
+  FileAdapter,
+  PresenceAdapter,
+} from "./types";
 
 export type SessionOptions = {
   codec: DocCodec;
   patchStore: PatchStore;
   clock?: () => number;
   userId?: number;
+  fileAdapter?: FileAdapter;
+  presenceAdapter?: PresenceAdapter;
 };
 
 /**
@@ -32,6 +27,8 @@ export class Session extends EventEmitter {
   private readonly patchStore: PatchStore;
   private readonly clock: () => number;
   private readonly graph: PatchGraph;
+  private readonly fileAdapter?: FileAdapter;
+  private readonly presenceAdapter?: PresenceAdapter;
   private doc?: Document;
   private lastDoc?: Document;
   private lastTime: number = 0;
@@ -47,6 +44,8 @@ export class Session extends EventEmitter {
     this.patchStore = opts.patchStore;
     this.clock = opts.clock ?? (() => Date.now());
     this.userId = opts.userId ?? 0;
+    this.fileAdapter = opts.fileAdapter;
+    this.presenceAdapter = opts.presenceAdapter;
     this.graph = new PatchGraph({ codec: this.codec });
   }
 
@@ -67,6 +66,7 @@ export class Session extends EventEmitter {
 
   close(): void {
     this.unsubscribe?.();
+    this.presenceAdapter?.publish(undefined);
     this.removeAllListeners();
   }
 
@@ -102,6 +102,14 @@ export class Session extends EventEmitter {
     this.localTimes.push(time);
     this.undoPtr = this.localTimes.length;
     await this.patchStore.append(envelope);
+    // Optionally persist to a file adapter
+    if (this.fileAdapter) {
+      await this.fileAdapter.write(this.codec.toString(nextDoc), {
+        base: this.lastDoc ? this.codec.toString(this.lastDoc) : undefined,
+      });
+    }
+    // Optionally publish presence after commit
+    this.presenceAdapter?.publish({ userId: this.userId, time });
     this.syncDoc();
     return envelope;
   }
@@ -120,6 +128,7 @@ export class Session extends EventEmitter {
     this.undoPtr -= 1;
     this.syncDoc();
     this.emit("undo", this.doc);
+    this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
   }
 
   redo(): void {
@@ -127,6 +136,7 @@ export class Session extends EventEmitter {
     this.undoPtr += 1;
     this.syncDoc();
     this.emit("redo", this.doc);
+    this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
   }
 
   private syncDoc(): void {
@@ -134,6 +144,13 @@ export class Session extends EventEmitter {
     this.doc = this.graph.value({ withoutTimes: without });
     this.lastDoc = this.doc;
     this.emit("change", this.doc);
+
+    // If a file adapter is present, keep it in sync
+    if (this.fileAdapter && this.doc) {
+      this.fileAdapter.write(this.codec.toString(this.doc)).catch(() => {
+        /* ignore file adapter errors in sync */
+      });
+    }
   }
 
   private withoutTimes(): number[] {

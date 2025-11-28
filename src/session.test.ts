@@ -1,32 +1,10 @@
-import { Session, type PatchEnvelope, type PatchStore } from "./session";
+import { Session } from "./session";
 import { StringCodec, StringDocument } from "./string-document";
-
-class InMemoryStore implements PatchStore {
-  private listeners: ((env: PatchEnvelope) => void)[] = [];
-  private patches: PatchEnvelope[] = [];
-
-  async loadInitial(): Promise<{ patches: PatchEnvelope[]; hasMore?: boolean }> {
-    return { patches: this.patches.slice() };
-  }
-
-  async append(envelope: PatchEnvelope): Promise<void> {
-    this.patches.push(envelope);
-    for (const fn of this.listeners) {
-      fn(envelope);
-    }
-  }
-
-  subscribe(onEnvelope: (env: PatchEnvelope) => void): () => void {
-    this.listeners.push(onEnvelope);
-    return () => {
-      this.listeners = this.listeners.filter((fn) => fn !== onEnvelope);
-    };
-  }
-}
+import { MemoryPatchStore } from "./adapters/memory-patch-store";
 
 describe("Session", () => {
   it("commits and merges remote patches", async () => {
-    const store = new InMemoryStore();
+    const store = new MemoryPatchStore();
     const sessionA = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
     const sessionB = new Session({ codec: StringCodec, patchStore: store, userId: 2 });
     await sessionA.init();
@@ -48,7 +26,7 @@ describe("Session", () => {
   });
 
   it("supports undo/redo of local commits", async () => {
-    const store = new InMemoryStore();
+    const store = new MemoryPatchStore();
     const session = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
     await session.init();
 
@@ -69,7 +47,7 @@ describe("Session", () => {
   });
 
   it("initializes from existing remote patches", async () => {
-    const store = new InMemoryStore();
+    const store = new MemoryPatchStore();
     const existing = new StringDocument("seed");
     const base = new StringDocument("");
     const patch = base.makePatch(existing);
@@ -81,7 +59,7 @@ describe("Session", () => {
   });
 
   it("undo/redo are no-ops at boundaries", async () => {
-    const store = new InMemoryStore();
+    const store = new MemoryPatchStore();
     const session = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
     await session.init();
     session.undo(); // no commits yet
