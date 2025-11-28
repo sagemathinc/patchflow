@@ -30,7 +30,6 @@ export class Session extends EventEmitter {
   private readonly fileAdapter?: FileAdapter;
   private readonly presenceAdapter?: PresenceAdapter;
   private doc?: Document;
-  private lastDoc?: Document;
   private lastTime: number = 0;
   private userId: number;
 
@@ -38,8 +37,10 @@ export class Session extends EventEmitter {
   private undoPtr = 0;
   private unsubscribe?: () => void;
   private fileUnsubscribe?: () => void;
-  private fileWriteInFlight?: Promise<void>;
-  private fileChangeSuppressCount = 0;
+  private pendingWrite?: Promise<void>;
+  private dirtyContent?: string;
+  private persistedContent?: string;
+  private suppressFileChanges = 0;
 
   constructor(opts: SessionOptions) {
     super();
@@ -60,7 +61,10 @@ export class Session extends EventEmitter {
     this.graph.add(patches);
     this.lastTime = this.computeLastTime();
     this.doc = this.graph.value();
-    this.lastDoc = this.doc;
+    if (this.fileAdapter && this.doc) {
+      // Track current doc string so we can skip redundant writes.
+      this.persistedContent = this.codec.toString(this.doc);
+    }
     this.emit("change", this.doc);
     this.unsubscribe = this.patchStore.subscribe((env) => {
       this.applyRemote(env);
@@ -110,16 +114,11 @@ export class Session extends EventEmitter {
     };
     this.graph.add([envelope]);
     this.doc = nextDoc;
-    this.lastDoc = nextDoc;
     // Reset undo future and record this local change.
     this.localTimes = this.localTimes.slice(0, this.undoPtr);
     this.localTimes.push(time);
     this.undoPtr = this.localTimes.length;
     await this.patchStore.append(envelope);
-    // Optionally persist to a file adapter
-    if (this.fileAdapter) {
-      await this.queueFileWrite(this.codec.toString(nextDoc), this.codec.toString(this.lastDoc));
-    }
     // Optionally publish presence after commit
     this.presenceAdapter?.publish({ userId: this.userId, time });
     this.syncDoc();
@@ -154,12 +153,12 @@ export class Session extends EventEmitter {
   private syncDoc(): void {
     const without = this.withoutTimes();
     this.doc = this.graph.value({ withoutTimes: without });
-    this.lastDoc = this.doc;
+    const text = this.codec.toString(this.doc);
     this.emit("change", this.doc);
 
     // If a file adapter is present, keep it in sync
     if (this.fileAdapter && this.doc) {
-      void this.queueFileWrite(this.codec.toString(this.doc));
+      this.queueFileWrite(text);
     }
   }
 
@@ -186,14 +185,15 @@ export class Session extends EventEmitter {
 
   private async handleFileChange(): Promise<void> {
     if (!this.doc || !this.fileAdapter) return;
-    if (this.fileChangeSuppressCount > 0) {
-      this.fileChangeSuppressCount -= 1;
+    if (this.suppressFileChanges > 0) {
+      this.suppressFileChanges -= 1;
       return;
     }
     try {
       const text = await this.fileAdapter.read();
       const newDoc = this.codec.fromString(text);
       if (this.doc.isEqual(newDoc)) return;
+      this.persistedContent = text;
       await this.applyExternalDoc(newDoc);
     } catch {
       // ignore file read errors
@@ -214,7 +214,6 @@ export class Session extends EventEmitter {
     };
     this.graph.add([envelope]);
     this.doc = newDoc;
-    this.lastDoc = newDoc;
     this.localTimes = this.localTimes.slice(0, this.undoPtr);
     this.localTimes.push(time);
     this.undoPtr = this.localTimes.length;
@@ -222,27 +221,32 @@ export class Session extends EventEmitter {
     this.syncDoc();
   }
 
-  private async queueFileWrite(content: string, base?: string): Promise<void> {
+  private queueFileWrite(content: string): void {
     if (!this.fileAdapter) return;
-    const prev = this.fileWriteInFlight;
-    const write = async () => {
-      this.fileChangeSuppressCount += 1;
+    if (this.persistedContent === content && !this.dirtyContent) return;
+    this.dirtyContent = content;
+    if (this.pendingWrite) return;
+    this.pendingWrite = this.flushFileQueue();
+  }
+
+  private async flushFileQueue(): Promise<void> {
+    while (this.dirtyContent !== undefined) {
+      const content = this.dirtyContent;
+      this.dirtyContent = undefined;
+      this.suppressFileChanges += 1;
       try {
-        await this.fileAdapter!.write(content, base ? { base } : undefined);
+        const hasBase = this.persistedContent !== undefined;
+        await this.fileAdapter!.write(
+          content,
+          hasBase ? { base: this.persistedContent } : undefined,
+        );
+        this.persistedContent = content;
+      } catch (err) {
+        this.emit("file-error", err);
       } finally {
-        this.fileChangeSuppressCount = Math.max(0, this.fileChangeSuppressCount - 1);
+        this.suppressFileChanges = Math.max(0, this.suppressFileChanges - 1);
       }
-    };
-    const promise = prev ? prev.catch(() => {}).then(write) : write();
-    this.fileWriteInFlight = promise.finally(() => {
-      if (this.fileWriteInFlight === promise) {
-        this.fileWriteInFlight = undefined;
-      }
-    });
-    try {
-      await promise;
-    } catch (err) {
-      this.emit("file-error", err);
     }
+    this.pendingWrite = undefined;
   }
 }

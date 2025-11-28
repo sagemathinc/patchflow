@@ -110,6 +110,43 @@ describe("Session", () => {
     expect(seen.length).toBeGreaterThanOrEqual(3);
   });
 
+  it("queues file writes sequentially without overlap", async () => {
+    const store = new MemoryPatchStore();
+    let current = "";
+    const writes: { content: string; base?: string }[] = [];
+    const file = {
+      async read(): Promise<string> {
+        return current;
+      },
+      async write(content: string, opts?: { base?: string }): Promise<void> {
+        writes.push({ content, base: opts?.base });
+        current = content;
+        // Simulate a slow write so multiple commits overlap.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      },
+      watch() {
+        return () => {};
+      },
+    };
+    const session = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      fileAdapter: file,
+    });
+    await session.init();
+    const p1 = session.commit(new StringDocument("one"));
+    const p2 = session.commit(new StringDocument("two"));
+    await Promise.all([p1, p2]);
+    // Wait for queued writes to flush.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(writes).toEqual([
+      { content: "one", base: "" },
+      { content: "two", base: "one" },
+    ]);
+    expect(await file.read()).toBe("two");
+  });
+
   it("emits presence events when presence adapter receives updates", async () => {
     const store = new MemoryPatchStore();
     const presence = new MemoryPresenceAdapter();
