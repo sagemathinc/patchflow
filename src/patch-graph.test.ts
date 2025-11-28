@@ -1,5 +1,6 @@
 import { PatchGraph } from "./patch-graph";
 import { StringCodec, StringDocument } from "./string-document";
+import { threeWayMerge } from "./dmp";
 
 describe("PatchGraph with StringDocument", () => {
   const codec = StringCodec;
@@ -62,5 +63,44 @@ describe("PatchGraph with StringDocument", () => {
     ]);
     expect(graph.version(1).toString()).toBe("X");
     expect(graph.version(2).toString()).toBe("X");
+  });
+
+  it("handles divergent branches and merges them", () => {
+    const graph = new PatchGraph({ codec });
+    const base = new StringDocument("");
+    const docA = new StringDocument("A");
+    const docB = new StringDocument("B");
+    const mergedString = threeWayMerge({
+      base: base.toString(),
+      local: docA.toString(),
+      remote: docB.toString(),
+    });
+    const docMerged = new StringDocument(mergedString);
+
+    const pA = base.makePatch(docA);
+    const pB = base.makePatch(docB);
+    // Merge patch reflects a 3-way merge of the heads and records a snapshot.
+    // The algorithm is: take the current heads (A and B), find their newest
+    // common ancestor (the empty base), run a 3-way merge (diff-match-patch
+    // decides whether the result is AB, BA, or something fuzzier), and
+    // materialize that merged text as a snapshot node. We still keep the
+    // original branch tips so timetravel can show exactly what each user
+    // committed before the merge.
+    graph.add([
+      { time: 1, patch: pA, parents: [], userId: 0 },
+      { time: 2, patch: pB, parents: [], userId: 1 },
+      {
+        time: 3,
+        parents: [1, 2],
+        userId: 0,
+        isSnapshot: true,
+        snapshot: docMerged.toString(),
+      },
+    ]);
+
+    expect(graph.getHeads()).toEqual([3]);
+    expect(graph.value().toString()).toBe(mergedString);
+    expect(graph.version(1).toString()).toBe("A");
+    expect(graph.version(2).toString()).toBe("B");
   });
 });
