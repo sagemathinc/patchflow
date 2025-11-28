@@ -38,6 +38,8 @@ export class Session extends EventEmitter {
   private undoPtr = 0;
   private unsubscribe?: () => void;
   private fileUnsubscribe?: () => void;
+  private fileWriteInFlight?: Promise<void>;
+  private fileChangeSuppressCount = 0;
 
   constructor(opts: SessionOptions) {
     super();
@@ -63,6 +65,11 @@ export class Session extends EventEmitter {
     this.unsubscribe = this.patchStore.subscribe((env) => {
       this.applyRemote(env);
     });
+    if (this.presenceAdapter) {
+      this.presenceAdapter.subscribe((state, clientId) => {
+        this.emit("presence", state, clientId);
+      });
+    }
     if (this.fileAdapter?.watch) {
       this.fileUnsubscribe = this.fileAdapter.watch(async () => {
         await this.handleFileChange();
@@ -111,9 +118,7 @@ export class Session extends EventEmitter {
     await this.patchStore.append(envelope);
     // Optionally persist to a file adapter
     if (this.fileAdapter) {
-      await this.fileAdapter.write(this.codec.toString(nextDoc), {
-        base: this.lastDoc ? this.codec.toString(this.lastDoc) : undefined,
-      });
+      await this.queueFileWrite(this.codec.toString(nextDoc), this.codec.toString(this.lastDoc));
     }
     // Optionally publish presence after commit
     this.presenceAdapter?.publish({ userId: this.userId, time });
@@ -154,9 +159,7 @@ export class Session extends EventEmitter {
 
     // If a file adapter is present, keep it in sync
     if (this.fileAdapter && this.doc) {
-      this.fileAdapter.write(this.codec.toString(this.doc)).catch(() => {
-        /* ignore file adapter errors in sync */
-      });
+      void this.queueFileWrite(this.codec.toString(this.doc));
     }
   }
 
@@ -183,6 +186,10 @@ export class Session extends EventEmitter {
 
   private async handleFileChange(): Promise<void> {
     if (!this.doc || !this.fileAdapter) return;
+    if (this.fileChangeSuppressCount > 0) {
+      this.fileChangeSuppressCount -= 1;
+      return;
+    }
     try {
       const text = await this.fileAdapter.read();
       const newDoc = this.codec.fromString(text);
@@ -213,5 +220,29 @@ export class Session extends EventEmitter {
     this.undoPtr = this.localTimes.length;
     await this.patchStore.append(envelope);
     this.syncDoc();
+  }
+
+  private async queueFileWrite(content: string, base?: string): Promise<void> {
+    if (!this.fileAdapter) return;
+    const prev = this.fileWriteInFlight;
+    const write = async () => {
+      this.fileChangeSuppressCount += 1;
+      try {
+        await this.fileAdapter!.write(content, base ? { base } : undefined);
+      } finally {
+        this.fileChangeSuppressCount = Math.max(0, this.fileChangeSuppressCount - 1);
+      }
+    };
+    const promise = prev ? prev.catch(() => {}).then(write) : write();
+    this.fileWriteInFlight = promise.finally(() => {
+      if (this.fileWriteInFlight === promise) {
+        this.fileWriteInFlight = undefined;
+      }
+    });
+    try {
+      await promise;
+    } catch (err) {
+      this.emit("file-error", err);
+    }
   }
 }

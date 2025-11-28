@@ -109,4 +109,20 @@ describe("Session", () => {
     session.redo();
     expect(seen.length).toBeGreaterThanOrEqual(3);
   });
+
+  it("emits presence events when presence adapter receives updates", async () => {
+    const store = new MemoryPatchStore();
+    const presence = new MemoryPresenceAdapter();
+    const seen: { state: unknown; id: string }[] = [];
+    const session = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      presenceAdapter: presence,
+    });
+    session.on("presence", (state, id) => seen.push({ state, id: id as string }));
+    await session.init();
+    presence.publish({ status: "online" });
+    expect(seen).toEqual([{ state: { status: "online" }, id: "memory" }]);
+  });
 });
