@@ -36,9 +36,12 @@ export interface DocCodec {
   makePatch(a: Document, b: Document): CompressedPatch;
 }
 
+export type MergeStrategy = "apply-all" | "three-way";
+
 export type PatchGraphValueOptions = {
   time?: number;
   withoutTimes?: number[];
+  mergeStrategy?: MergeStrategy;
 };
 
 // Optional metadata describing where a patch came from (e.g., transport id).

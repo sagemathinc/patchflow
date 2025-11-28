@@ -1,5 +1,12 @@
 import { List, Map } from "immutable";
-import type { DocCodec, Document, Patch, PatchGraphValueOptions } from "./types";
+import { threeWayMerge } from "./dmp";
+import type {
+  DocCodec,
+  Document,
+  MergeStrategy,
+  Patch,
+  PatchGraphValueOptions,
+} from "./types";
 
 type PatchMap = Map<number, Patch>;
 
@@ -20,9 +27,11 @@ export class PatchGraph {
   private children: Map<number, Set<number>> = Map<number, Set<number>>();
   private codec: DocCodec;
   public fileTimeDedupTolerance = DEFAULT_DEDUP_TOLERANCE;
+  private mergeStrategy: MergeStrategy;
 
-  constructor(opts: { codec: DocCodec }) {
+  constructor(opts: { codec: DocCodec; mergeStrategy?: MergeStrategy }) {
     this.codec = opts.codec;
+    this.mergeStrategy = opts.mergeStrategy ?? "three-way";
   }
 
   add(input: Patch[]): void {
@@ -70,11 +79,90 @@ export class PatchGraph {
     );
   }
 
+  getPatch(time: number): Patch {
+    const p = this.patches.get(time);
+    if (!p) {
+      throw new Error(`unknown time: ${time}`);
+    }
+    return p;
+  }
+
+  getParents(time: number): number[] {
+    return [...(this.getPatch(time).parents ?? [])];
+  }
+
+  getAncestors(
+    times: number | number[],
+    opts: { includeSelf?: boolean; stopAtSnapshots?: boolean } = {},
+  ): number[] {
+    const includeSelf = opts.includeSelf ?? true;
+    const stopAtSnapshots = opts.stopAtSnapshots ?? true;
+    const seeds = Array.isArray(times) ? [...times] : [times];
+    const seedSet = new Set(seeds);
+    const stack = [...seeds];
+    const visited = new Set<number>();
+    while (stack.length > 0) {
+      const t = stack.pop()!;
+      if (visited.has(t)) continue;
+      const patch = this.patches.get(t);
+      if (!patch) {
+        throw new Error(`unknown time: ${t}`);
+      }
+      if (includeSelf || !seedSet.has(t)) {
+        visited.add(t);
+      }
+      if (stopAtSnapshots && patch.isSnapshot) continue;
+      for (const p of patch.parents ?? []) {
+        stack.push(p);
+      }
+    }
+    return Array.from(visited.values()).sort((a, b) => a - b);
+  }
+
+  getParentChains(
+    time: number,
+    opts: { stopAtSnapshots?: boolean; limit?: number } = {},
+  ): number[][] {
+    const stopAtSnapshots = opts.stopAtSnapshots ?? true;
+    const limit = opts.limit ?? 1000;
+    const start = this.getPatch(time); // throws if missing
+    const chains: number[][] = [];
+    const stack: { node: Patch; path: number[] }[] = [{ node: start, path: [time] }];
+    while (stack.length > 0) {
+      const { node, path } = stack.pop()!;
+      const parents = node.parents ?? [];
+      const terminal =
+        parents.length === 0 || (stopAtSnapshots && node.isSnapshot === true);
+      if (terminal) {
+        chains.push(path);
+        if (chains.length > limit) {
+          throw new Error("parent chain limit exceeded");
+        }
+        continue;
+      }
+      for (const p of parents) {
+        const parent = this.patches.get(p);
+        if (!parent) {
+          throw new Error(`unknown parent ${p}`);
+        }
+        stack.push({ node: parent, path: [...path, p] });
+      }
+    }
+    return chains.sort((a, b) =>
+      [...a].reverse().join(",").localeCompare([...b].reverse().join(",")),
+    );
+  }
+
   versions(): number[] {
     return this.patches
       .toArray()
       .map(([, patch]) => patch.time)
       .sort((a, b) => a - b);
+  }
+
+  versionsInRange(opts: { start?: number; end?: number } = {}): number[] {
+    const { start = -Infinity, end = Infinity } = opts;
+    return this.versions().filter((t) => t >= start && t <= end);
   }
 
   version(time: number): Document {
@@ -85,11 +173,22 @@ export class PatchGraph {
   }
 
   value(opts: PatchGraphValueOptions = {}): Document {
+    if (opts.time != null && !this.patches.has(opts.time)) {
+      throw new Error(`unknown time: ${opts.time}`);
+    }
     const without = new Set<number>(opts.withoutTimes ?? []);
     const headTimes = opts.time != null ? [opts.time] : this.getHeads();
     if (headTimes.length === 0) {
       return this.codec.fromString("");
     }
+    const strategy = opts.mergeStrategy ?? this.mergeStrategy;
+    if (headTimes.length > 1 && strategy === "three-way") {
+      return this.mergeHeadsThreeWay(headTimes, without);
+    }
+    return this.applyAllValue(headTimes, without);
+  }
+
+  private applyAllValue(headTimes: number[], without: Set<number>): Document {
     const reachable = this.knownTimes(headTimes);
     for (const w of without) {
       reachable.delete(w);
@@ -122,6 +221,54 @@ export class PatchGraph {
     return doc;
   }
 
+  private mergeHeadsThreeWay(headTimes: number[], without: Set<number>): Document {
+    // Merge multiple heads by repeatedly 3-way merging them:
+    // 1) Order heads deterministically (time/version/user tie-break).
+    // 2) Start from the first head's value; track its ancestor set.
+    // 3) For each subsequent head, find newest common ancestor between the
+    //    accumulated merge and that head, compute base/local/remote strings,
+    //    and run a diff-match-patch 3-way merge.
+    // 4) Repeat until all heads are merged. This mirrors the Mercurial-like
+    //    notion of merging heads one at a time while preserving the DAG.
+    const orderedHeads = this.sortHeads(headTimes);
+    let mergedDoc = this.applyAllValue([orderedHeads[0]], without);
+    let mergedAncestors = this.knownTimes([orderedHeads[0]]);
+
+    for (const head of orderedHeads.slice(1)) {
+      const headAncestors = this.knownTimes([head]);
+      const baseTime = this.newestCommonAncestor(mergedAncestors, headAncestors);
+      const baseDoc =
+        baseTime != null
+          ? this.applyAllValue([baseTime], without)
+          : this.codec.fromString("");
+      const remoteDoc = this.applyAllValue([head], without);
+      const mergedText = threeWayMerge({
+        base: this.codec.toString(baseDoc),
+        local: this.codec.toString(mergedDoc),
+        remote: this.codec.toString(remoteDoc),
+      });
+      mergedDoc = this.codec.fromString(mergedText);
+      mergedAncestors = new Set([...mergedAncestors, ...headAncestors]);
+    }
+
+    return mergedDoc;
+  }
+
+  private sortHeads(headTimes: number[]): number[] {
+    return [...headTimes].sort((a, b) => patchCmp(this.patches.get(a)!, this.patches.get(b)!));
+  }
+
+  private newestCommonAncestor(a: Set<number>, b: Set<number>): number | undefined {
+    let best: number | undefined;
+    for (const t of a) {
+      if (!b.has(t)) continue;
+      if (best === undefined || t > best) {
+        best = t;
+      }
+    }
+    return best;
+  }
+
   private knownTimes(heads: number[]): Set<number> {
     const seen = new Set<number>();
     const stack = [...heads];
@@ -131,8 +278,10 @@ export class PatchGraph {
       const patch = this.patches.get(t);
       if (!patch) continue;
       seen.add(t);
-      for (const p of patch.parents ?? []) {
-        stack.push(p);
+      if ((patch.parents?.length ?? 0) > 0 && !patch.isSnapshot) {
+        for (const p of patch.parents ?? []) {
+          stack.push(p);
+        }
       }
     }
     return seen;
