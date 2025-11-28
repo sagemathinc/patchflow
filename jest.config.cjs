@@ -4,10 +4,7 @@ module.exports = {
   roots: ["<rootDir>/src"],
   extensionsToTreatAsEsm: [".ts"],
   transform: {
-    "^.+\\.tsx?$": [
-      "ts-jest",
-      { tsconfig: "<rootDir>/tsconfig.esm.json", useESM: true },
-    ],
+    "^.+\\.tsx?$": ["ts-jest", { tsconfig: "<rootDir>/tsconfig.esm.json", useESM: true }],
   },
   moduleFileExtensions: ["ts", "js", "json"],
   collectCoverageFrom: ["src/**/*.{ts,tsx}"],

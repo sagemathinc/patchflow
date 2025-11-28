@@ -1,10 +1,5 @@
 import { List, Map } from "immutable";
-import type {
-  DocCodec,
-  Document,
-  Patch,
-  PatchGraphValueOptions,
-} from "./types";
+import type { DocCodec, Document, Patch, PatchGraphValueOptions } from "./types";
 
 type PatchMap = Map<number, Patch>;
 
@@ -71,10 +66,7 @@ export class PatchGraph {
       allTimes.delete(p);
     }
     return Array.from(allTimes.values()).sort((a, b) =>
-      patchCmp(
-        this.patches.get(a)!,
-        this.patches.get(b)!,
-      ),
+      patchCmp(this.patches.get(a)!, this.patches.get(b)!),
     );
   }
 

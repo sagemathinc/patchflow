@@ -47,7 +47,6 @@ export class StringDocument implements Document {
 export const StringCodec = {
   fromString: (text: string) => new StringDocument(text),
   toString: (doc: StringDocument) => doc.toString(),
-  applyPatch: (doc: StringDocument, patch: CompressedPatch) =>
-    doc.applyPatch(patch),
+  applyPatch: (doc: StringDocument, patch: CompressedPatch) => doc.applyPatch(patch),
   makePatch: (a: StringDocument, b: StringDocument) => a.makePatch(b),
 };

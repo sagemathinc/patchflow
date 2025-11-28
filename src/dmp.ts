@@ -1,12 +1,6 @@
 import { DiffMatchPatch, PatchObject } from "@cocalc/diff-match-patch";
 
-export type CompressedPatch = [
-  [-1 | 0 | 1, string][],
-  number,
-  number,
-  number,
-  number,
-][];
+export type CompressedPatch = [[-1 | 0 | 1, string][], number, number, number, number][];
 
 const dmp = new DiffMatchPatch();
 dmp.diffTimeout = 0.2;
@@ -34,10 +28,7 @@ export function makePatch(s0: string, s1: string): CompressedPatch {
   return compressPatch(dmp.patch_make(s0, s1));
 }
 
-export function applyPatch(
-  patch: CompressedPatch,
-  s: string,
-): [string, boolean] {
+export function applyPatch(patch: CompressedPatch, s: string): [string, boolean] {
   let result;
   try {
     result = dmp.patch_apply(decompressPatch(patch), s);
@@ -48,11 +39,7 @@ export function applyPatch(
   return [result[0], clean];
 }
 
-export function threeWayMerge(opts: {
-  base: string;
-  local: string;
-  remote: string;
-}): string {
+export function threeWayMerge(opts: { base: string; local: string; remote: string }): string {
   if (opts.base === opts.remote) {
     return opts.local;
   }
