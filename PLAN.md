@@ -77,4 +77,3 @@ type SessionDeps = {
 4. Add file adapter \+ tests: overlapping saves, init/close races, remote patches arriving during disk write.
 5. Add presence adapter \(optional\) and keep it out of the core unless supplied.
 6. Integrate back into CoCalc via adapters \(conat\-backed PatchStore, FS/watch wrapper\), without reintroducing CoCalc\-specific code into the core.
-

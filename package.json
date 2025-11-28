@@ -20,9 +20,11 @@
     "build:esm": "tsc -p tsconfig.esm.json",
     "build:cjs": "tsc -p tsconfig.cjs.json",
     "test": "jest --runInBand",
+    "clean": "rm -rf dist node_modules",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "lint:fix": "pnpm lint -- --fix",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "check": "pnpm format && pnpm test && pnpm lint"
   },
   "dependencies": {
     "@cocalc/diff-match-patch": "^1.0.0",

@@ -1,12 +1,6 @@
 import { List, Map } from "immutable";
 import { threeWayMerge } from "./dmp";
-import type {
-  DocCodec,
-  Document,
-  MergeStrategy,
-  Patch,
-  PatchGraphValueOptions,
-} from "./types";
+import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions } from "./types";
 
 type PatchMap = Map<number, Patch>;
 
@@ -131,8 +125,7 @@ export class PatchGraph {
     while (stack.length > 0) {
       const { node, path } = stack.pop()!;
       const parents = node.parents ?? [];
-      const terminal =
-        parents.length === 0 || (stopAtSnapshots && node.isSnapshot === true);
+      const terminal = parents.length === 0 || (stopAtSnapshots && node.isSnapshot === true);
       if (terminal) {
         chains.push(path);
         if (chains.length > limit) {
@@ -149,7 +142,10 @@ export class PatchGraph {
       }
     }
     return chains.sort((a, b) =>
-      [...a].reverse().join(",").localeCompare([...b].reverse().join(",")),
+      [...a]
+        .reverse()
+        .join(",")
+        .localeCompare([...b].reverse().join(",")),
     );
   }
 
@@ -238,9 +234,7 @@ export class PatchGraph {
       const headAncestors = this.knownTimes([head]);
       const baseTime = this.newestCommonAncestor(mergedAncestors, headAncestors);
       const baseDoc =
-        baseTime != null
-          ? this.applyAllValue([baseTime], without)
-          : this.codec.fromString("");
+        baseTime != null ? this.applyAllValue([baseTime], without) : this.codec.fromString("");
       const remoteDoc = this.applyAllValue([head], without);
       const mergedText = threeWayMerge({
         base: this.codec.toString(baseDoc),

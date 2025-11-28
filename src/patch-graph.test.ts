@@ -145,13 +145,11 @@ describe("PatchGraph with StringDocument", () => {
 
     expect(graph.getParents(3)).toEqual([1]);
     expect(graph.getAncestors(3)).toEqual([1, 3]); // stops at snapshot by default
-    expect(
-      graph.getAncestors(4, { stopAtSnapshots: false, includeSelf: true }),
-    ).toEqual([1, 2, 3, 4]);
+    expect(graph.getAncestors(4, { stopAtSnapshots: false, includeSelf: true })).toEqual([
+      1, 2, 3, 4,
+    ]);
 
-    expect(
-      graph.getParentChains(4, { stopAtSnapshots: false }),
-    ).toEqual([
+    expect(graph.getParentChains(4, { stopAtSnapshots: false })).toEqual([
       [4, 3, 1],
       [4, 2],
     ]);
