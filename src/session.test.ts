@@ -1,6 +1,8 @@
 import { Session } from "./session";
 import { StringCodec, StringDocument } from "./string-document";
 import { MemoryPatchStore } from "./adapters/memory-patch-store";
+import { MemoryFileAdapter } from "./adapters/memory-file-adapter";
+import { MemoryPresenceAdapter } from "./adapters/memory-presence-adapter";
 
 describe("Session", () => {
   it("commits and merges remote patches", async () => {
@@ -70,5 +72,41 @@ describe("Session", () => {
     session.undo();
     session.undo(); // extra undo should not throw
     expect(session.getDocument().toString()).toBe("");
+  });
+
+  it("syncs file adapter on commit and reacts to external file changes", async () => {
+    const store = new MemoryPatchStore();
+    const file = new MemoryFileAdapter("");
+    const session = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      fileAdapter: file,
+    });
+    await session.init();
+    await session.commit(new StringDocument("filedata"));
+    expect(await file.read()).toBe("filedata");
+    // external write triggers watch and updates session doc
+    await file.write("external");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.getDocument().toString()).toBe("external");
+  });
+
+  it("publishes presence on commit/undo/redo via presence adapter", async () => {
+    const store = new MemoryPatchStore();
+    const presence = new MemoryPresenceAdapter();
+    const seen: unknown[] = [];
+    presence.subscribe((state) => seen.push(state));
+    const session = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      presenceAdapter: presence,
+    });
+    await session.init();
+    await session.commit(new StringDocument("P"));
+    session.undo();
+    session.redo();
+    expect(seen.length).toBeGreaterThanOrEqual(3);
   });
 });

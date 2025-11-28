@@ -37,6 +37,7 @@ export class Session extends EventEmitter {
   private localTimes: number[] = [];
   private undoPtr = 0;
   private unsubscribe?: () => void;
+  private fileUnsubscribe?: () => void;
 
   constructor(opts: SessionOptions) {
     super();
@@ -62,10 +63,16 @@ export class Session extends EventEmitter {
     this.unsubscribe = this.patchStore.subscribe((env) => {
       this.applyRemote(env);
     });
+    if (this.fileAdapter?.watch) {
+      this.fileUnsubscribe = this.fileAdapter.watch(async () => {
+        await this.handleFileChange();
+      });
+    }
   }
 
   close(): void {
     this.unsubscribe?.();
+    this.fileUnsubscribe?.();
     this.presenceAdapter?.publish(undefined);
     this.removeAllListeners();
   }
@@ -172,5 +179,39 @@ export class Session extends EventEmitter {
       this.lastTime += 1;
     }
     return this.lastTime;
+  }
+
+  private async handleFileChange(): Promise<void> {
+    if (!this.doc || !this.fileAdapter) return;
+    try {
+      const text = await this.fileAdapter.read();
+      const newDoc = this.codec.fromString(text);
+      if (this.doc.isEqual(newDoc)) return;
+      await this.applyExternalDoc(newDoc);
+    } catch {
+      // ignore file read errors
+    }
+  }
+
+  private async applyExternalDoc(newDoc: Document): Promise<void> {
+    if (!this.doc) return;
+    const patch = this.doc.makePatch(newDoc);
+    const time = this.nextTime();
+    const envelope: PatchEnvelope = {
+      time,
+      wall: this.clock(),
+      patch,
+      parents: this.graph.getHeads(),
+      userId: this.userId,
+      version: this.graph.versions().length + 1,
+    };
+    this.graph.add([envelope]);
+    this.doc = newDoc;
+    this.lastDoc = newDoc;
+    this.localTimes = this.localTimes.slice(0, this.undoPtr);
+    this.localTimes.push(time);
+    this.undoPtr = this.localTimes.length;
+    await this.patchStore.append(envelope);
+    this.syncDoc();
   }
 }
