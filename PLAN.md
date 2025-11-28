@@ -3,6 +3,7 @@
 Goals: extract the generic patch-DAG realtime sync core from CoCalc into a standalone, MIT-licensed package with clear adapters and comprehensive tests. Keep the core transport-agnostic and file-system-agnostic.
 
 ## Proposed Module Boundaries
+
 - core/types: `Document`, `Patch`, `PatchId`/logical time, `Snapshot`, `Version`, error types.
 - core/diff: pluggable diff/patch codec; include a default string codec (wraps DiffMatchPatch) plus hooks for custom codecs.
 - core/patch-graph: deterministic DAG manager (similar to `SortedPatchList`), handles add/merge, known-heads tracking, snapshots, caching, dedup (file-load dedup), and value computation `value({time?, without?})`.
@@ -14,12 +15,15 @@ Goals: extract the generic patch-DAG realtime sync core from CoCalc into a stand
 - testing harness: in-memory implementations of patch-store/file/presence to exercise the core without any I/O.
 
 ## Minimal Adapter Interfaces (sketch)
+
 Types used below:
+
 - `PatchEnvelope = { patch: Patch; source?: string; seq?: number; isSnapshot?: boolean; snapshotValue?: string }`
 - `SnapshotEnvelope = { time: number; value: string; version: number; seq?: number }`
 - `DocCodec = { fromString(s: string): Document; toString(doc: Document): string; makePatch(a: Document, b: Document): CompressedPatch; applyPatch(doc: Document, patch: CompressedPatch): Document }`
 
 Patch store / transport (required):
+
 ```ts
 interface PatchStore {
   // load initial state (optionally paged); returns patches + known snapshot if any
@@ -32,6 +36,7 @@ interface PatchStore {
 ```
 
 File adapter (optional):
+
 ```ts
 interface FileAdapter {
   read(): Promise<string>; // throws ENOENT-style error if missing
@@ -41,6 +46,7 @@ interface FileAdapter {
 ```
 
 Presence adapter (optional):
+
 ```ts
 interface PresenceAdapter {
   publish(state: any): void;
@@ -49,6 +55,7 @@ interface PresenceAdapter {
 ```
 
 Session construction sketch:
+
 ```ts
 type SessionDeps = {
   codec: DocCodec;
@@ -61,9 +68,11 @@ type SessionDeps = {
 ```
 
 ## Refactor Steps (suggested)
+
 1) Lift `Document`/`Patch`/`SortedPatchList`-equivalent into core modules with zero CoCalc deps.
 2) Write in-memory `PatchStore` + `DocCodec` (string) and port existing SortedPatchList tests; add coverage for merges, snapshots, undo/redo, value(without).
 3) Rebuild a slim `Session` around adapters; keep file/presence optional. Replace `reuseInFlight`-style saves with a small dirty/queue state machine.
 4) Add file adapter + tests: overlapping saves, init/close races, remote patches arriving during disk write.
 5) Add presence adapter (optional) and keep it out of the core unless supplied.
 6) Integrate back into CoCalc via adapters (conat-backed PatchStore, FS/watch wrapper), without reintroducing CoCalc-specific code into the core.
+
