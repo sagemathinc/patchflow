@@ -147,6 +147,97 @@ describe("Session", () => {
     expect(await file.read()).toBe("two");
   });
 
+  it("ignores file changes after close", async () => {
+    const store = new MemoryPatchStore();
+    let current = "";
+    let watchCalls = 0;
+    const listeners: (() => void)[] = [];
+    const file = {
+      async read(): Promise<string> {
+        return current;
+      },
+      async write(content: string): Promise<void> {
+        current = content;
+        for (const fn of listeners) fn();
+      },
+      watch(onChange: () => void) {
+        listeners.push(onChange);
+        return () => {
+          const idx = listeners.indexOf(onChange);
+          if (idx >= 0) listeners.splice(idx, 1);
+        };
+      },
+    };
+    const session = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      fileAdapter: file,
+    });
+    session.on("change", () => {
+      watchCalls += 1;
+    });
+    await session.init();
+    await session.commit(new StringDocument("alive"));
+    expect(await file.read()).toBe("alive");
+    const seen = watchCalls;
+    session.close();
+    await file.write("after-close");
+    // Give any stray timers a chance (should be none).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.getDocument().toString()).toBe("alive");
+    expect(watchCalls).toBe(seen);
+  });
+
+  it("flushes remote patches that arrive during an in-flight file write", async () => {
+    const store = new MemoryPatchStore();
+    const writes: { content: string; base?: string }[] = [];
+    let current = "";
+    let inFlight = 0;
+    const file = {
+      async read(): Promise<string> {
+        return current;
+      },
+      async write(content: string, opts?: { base?: string }): Promise<void> {
+        if (inFlight !== 0) {
+          throw new Error("write overlap");
+        }
+        inFlight += 1;
+        writes.push({ content, base: opts?.base });
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        current = content;
+        inFlight -= 1;
+      },
+      watch() {
+        return () => {};
+      },
+    };
+    const sessionA = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      fileAdapter: file,
+    });
+    const sessionB = new Session({ codec: StringCodec, patchStore: store, userId: 2 });
+    await sessionA.init();
+    await sessionB.init();
+
+    const first = sessionA.commit(new StringDocument("one"));
+    // While the first write is in-flight, sessionB commits a remote change.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const remote = sessionB.commit(new StringDocument("remote"));
+    await Promise.all([first, remote]);
+    // Wait for queued writes to drain.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(writes).toEqual([
+      { content: "one", base: "" },
+      { content: "remote", base: "one" },
+    ]);
+    expect(await file.read()).toBe("remote");
+    expect(sessionA.getDocument().toString()).toBe("remote");
+    expect(sessionB.getDocument().toString()).toBe("remote");
+  });
+
   it("emits presence events when presence adapter receives updates", async () => {
     const store = new MemoryPatchStore();
     const presence = new MemoryPresenceAdapter();

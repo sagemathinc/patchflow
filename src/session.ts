@@ -10,11 +10,17 @@ import type {
 } from "./types";
 
 export type SessionOptions = {
+  // Codec used to convert between strings and document instances and to make/apply patches.
   codec: DocCodec;
+  // Persistence/transport adapter for loading initial history and appending patches.
   patchStore: PatchStore;
+  // Optional clock override (defaults to Date.now) for deterministic testing.
   clock?: () => number;
+  // Optional local user id, propagated on emitted patches/presence.
   userId?: number;
+  // Optional file adapter to mirror the current doc to disk and watch for external edits.
   fileAdapter?: FileAdapter;
+  // Optional presence adapter to publish/receive lightweight presence state.
   presenceAdapter?: PresenceAdapter;
 };
 
@@ -42,6 +48,7 @@ export class Session extends EventEmitter {
   private persistedContent?: string;
   private suppressFileChanges = 0;
 
+  // Build session state and wire adapters.
   constructor(opts: SessionOptions) {
     super();
     this.codec = opts.codec;
@@ -53,9 +60,7 @@ export class Session extends EventEmitter {
     this.graph = new PatchGraph({ codec: this.codec });
   }
 
-  /**
-   * Load initial history and start listening for remote patches.
-   */
+  // Load initial history, seed state, and subscribe to adapters.
   async init(): Promise<void> {
     const { patches } = await this.patchStore.loadInitial();
     this.graph.add(patches);
@@ -81,6 +86,7 @@ export class Session extends EventEmitter {
     }
   }
 
+  // Tear down subscriptions and presence when done.
   close(): void {
     this.unsubscribe?.();
     this.fileUnsubscribe?.();
@@ -88,6 +94,7 @@ export class Session extends EventEmitter {
     this.removeAllListeners();
   }
 
+  // Return the current document or throw if not initialized.
   getDocument(): Document {
     if (!this.doc) {
       throw new Error("session not initialized");
@@ -95,9 +102,7 @@ export class Session extends EventEmitter {
     return this.doc;
   }
 
-  /**
-   * Commit a new document state as a patch and append to the store.
-   */
+  // Apply local change as a patch, persist, and publish presence.
   async commit(nextDoc: Document): Promise<PatchEnvelope> {
     if (!this.doc) {
       throw new Error("session not initialized");
@@ -125,15 +130,14 @@ export class Session extends EventEmitter {
     return envelope;
   }
 
-  /**
-   * Apply a remote patch envelope.
-   */
+  // Merge a remote patch and refresh the current document.
   applyRemote(env: PatchEnvelope): void {
     this.graph.add([env]);
     this.lastTime = Math.max(this.lastTime, env.time);
     this.syncDoc();
   }
 
+  // Step the undo pointer backward and recompute the doc.
   undo(): void {
     if (this.undoPtr === 0) return;
     this.undoPtr -= 1;
@@ -142,6 +146,7 @@ export class Session extends EventEmitter {
     this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
   }
 
+  // Step the undo pointer forward and recompute the doc.
   redo(): void {
     if (this.undoPtr === this.localTimes.length) return;
     this.undoPtr += 1;
@@ -150,6 +155,7 @@ export class Session extends EventEmitter {
     this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
   }
 
+  // Recompute the current document (respecting undo/redo), emit change, and enqueue a file write if needed.
   private syncDoc(): void {
     const without = this.withoutTimes();
     this.doc = this.graph.value({ withoutTimes: without });
@@ -162,17 +168,20 @@ export class Session extends EventEmitter {
     }
   }
 
+  // List local patch times that should be excluded (undo region).
   private withoutTimes(): number[] {
     if (this.undoPtr >= this.localTimes.length) return [];
     return this.localTimes.slice(this.undoPtr);
   }
 
+  // Compute the latest logical time from the graph.
   private computeLastTime(): number {
     const versions = this.graph.versions();
     if (versions.length === 0) return 0;
     return Math.max(...versions);
   }
 
+  // Produce the next monotonic logical time.
   private nextTime(): number {
     const t = this.clock();
     if (t > this.lastTime) {
@@ -183,6 +192,7 @@ export class Session extends EventEmitter {
     return this.lastTime;
   }
 
+  // React to filesystem changes by ingesting external content.
   private async handleFileChange(): Promise<void> {
     if (!this.doc || !this.fileAdapter) return;
     if (this.suppressFileChanges > 0) {
@@ -200,6 +210,7 @@ export class Session extends EventEmitter {
     }
   }
 
+  // Convert external doc changes into a patch and append it.
   private async applyExternalDoc(newDoc: Document): Promise<void> {
     if (!this.doc) return;
     const patch = this.doc.makePatch(newDoc);
@@ -221,6 +232,7 @@ export class Session extends EventEmitter {
     this.syncDoc();
   }
 
+  // Record desired content and start a write flush if idle.
   private queueFileWrite(content: string): void {
     if (!this.fileAdapter) return;
     if (this.persistedContent === content && !this.dirtyContent) return;
@@ -229,6 +241,7 @@ export class Session extends EventEmitter {
     this.pendingWrite = this.flushFileQueue();
   }
 
+  // Sequentially write queued content to the file adapter with base hints.
   private async flushFileQueue(): Promise<void> {
     while (this.dirtyContent !== undefined) {
       const content = this.dirtyContent;
