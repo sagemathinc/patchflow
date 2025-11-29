@@ -189,7 +189,7 @@ export class Session extends EventEmitter {
     if (!this.doc) {
       throw new Error("session not initialized");
     }
-    const patch = this.doc.makePatch(nextDoc);
+    const patch = this.codec.makePatch(this.doc, nextDoc);
     const time = this.nextTime();
     const envelope: PatchEnvelope = {
       time,
@@ -207,10 +207,10 @@ export class Session extends EventEmitter {
     this.localTimes = this.localTimes.slice(0, this.undoPtr);
     this.localTimes.push(time);
     this.undoPtr = this.localTimes.length;
+    this.syncDoc();
     await this.patchStore.append(envelope);
     // Optionally publish presence after commit
     this.presenceAdapter?.publish({ userId: this.userId, time });
-    this.syncDoc();
     return envelope;
   }
 
