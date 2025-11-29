@@ -9,4 +9,14 @@ export * from "./adapters/memory-file-adapter";
 export * from "./adapters/memory-presence-adapter";
 export * from "./working-copy";
 export * from "./db-document-immutable";
-export * from "./db-document-immer";
+export {
+  DbDocumentImmer,
+  createImmerDbCodec,
+  fromString as fromImmerString,
+} from "./db-document-immer";
+export type {
+  DbPatch as DbPatchImmer,
+  SetCondition as SetConditionImmer,
+  WhereCondition as WhereConditionImmer,
+} from "./db-document-immer";
+export * as dbDocumentImmer from "./db-document-immer";

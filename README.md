@@ -2,6 +2,8 @@
 
 Patchflow is a lightweight patch-DAG sync core. It manages concurrent edits to a document by recording patches with ancestry, merging heads deterministically, and keeping an optional on-disk or transport adapter out of core. The goal is a small, well-tested engine that prioritizes correctness and “small revision history” over heavyweight state replication.
 
+**STATUS:** NOT YET READY FOR PRODUCTION \(Nov 2025\).
+
 ## What’s inside
 
 - Core patch DAG: [src/patch-graph.ts](./src/patch-graph.ts) handles patch ancestry, head detection, three-way merges, snapshots, and file-load dedup.
@@ -36,9 +38,9 @@ When to reach for Yjs/Automerge:
 - Run tests: `pnpm test`
 - Lint/format: `pnpm lint`, `pnpm format`
 - Build: `pnpm build` (ESM + CJS)
-- Try the TCP demo (ts-node):  
-  - Server: `node --loader ts-node/esm --experimental-specifier-resolution=node examples/tcp-session.ts --role=server --file=/tmp/patchflow-a.txt --port=8123`  
-  - Client: same with `--role=client --file=/tmp/patchflow-b.txt --host=127.0.0.1 --port=8123`  
+- Try the TCP demo (ts-node):
+  - Server: `node --loader ts-node/esm --experimental-specifier-resolution=node examples/tcp-session.ts --role=server --file=/tmp/patchflow-a.txt --port=8123`
+  - Client: same with `--role=client --file=/tmp/patchflow-b.txt --host=127.0.0.1 --port=8123`
   - Use `set("text")`, `commit()`, `get()` in the REPL to stage/send changes.
 
 ## Status and roadmap

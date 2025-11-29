@@ -1,6 +1,6 @@
 {
   "name": "patchflow",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "description": "Lightweight patch-DAG realtime sync core",
   "license": "MIT",
@@ -31,7 +31,11 @@
     "example:tcp:server": "pnpm build && node dist/esm/examples/tcp-session.js --role=server --file=/tmp/patchflow-a.txt",
     "example:tcp:client": "pnpm build && node dist/esm/examples/tcp-session.js --role=client --file=/tmp/patchflow-b.txt",
     "example:tcp:server:ts": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/tcp-session.ts --role=server --file=/tmp/patchflow-a.txt",
-    "example:tcp:client:ts": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/tcp-session.ts --role=client --file=/tmp/patchflow-b.txt --host=127.0.0.1"
+    "example:tcp:client:ts": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/tcp-session.ts --role=client --file=/tmp/patchflow-b.txt --host=127.0.0.1",
+    "example:db-immer:server": "pnpm build && node dist/esm/examples/db-immer-session.js --role=server",
+    "example:db-immer:client": "pnpm build && node dist/esm/examples/db-immer-session.js --role=client --host=127.0.0.1",
+    "example:db-immer:server:ts": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/db-immer-session.ts --role=server",
+    "example:db-immer:client:ts": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/db-immer-session.ts --role=client --host=127.0.0.1"
   },
   "dependencies": {
     "@cocalc/diff-match-patch": "^1.0.0",

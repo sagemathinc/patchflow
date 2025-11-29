@@ -8,7 +8,12 @@ const external = (id) =>
 
 /** @type {import('rollup').RollupOptions} */
 const config = {
-  input: ["src/index.ts", "examples/basic-session.ts", "examples/tcp-session.ts"],
+  input: [
+    "src/index.ts",
+    "examples/basic-session.ts",
+    "examples/tcp-session.ts",
+    "examples/db-immer-session.ts",
+  ],
   output: {
     dir: "dist/esm",
     format: "esm",
