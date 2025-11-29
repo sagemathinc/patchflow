@@ -48,6 +48,12 @@ export class Session extends EventEmitter {
   private persistedContent?: string;
   private suppressFileChanges = 0;
 
+  private ensureInitialized(): void {
+    if (!this.doc) {
+      throw new Error("session not initialized");
+    }
+  }
+
   // Build session state and wire adapters.
   constructor(opts: SessionOptions) {
     super();
@@ -94,12 +100,91 @@ export class Session extends EventEmitter {
     this.removeAllListeners();
   }
 
+  // Return logical times (versions) in ascending order.
+  versions(opts: { start?: number; end?: number } = {}): number[] {
+    this.ensureInitialized();
+    return this.graph.versions(opts);
+  }
+
+  // Return a sorted list of patches in the session, optionally filtered.
+  history(
+    opts: { start?: number; end?: number; includeSnapshots?: boolean } = {},
+  ): PatchEnvelope[] {
+    this.ensureInitialized();
+    return this.graph.history(opts).map((p) => ({ ...p }));
+  }
+
+  // Fetch a specific patch by logical time.
+  getPatch(time: number): PatchEnvelope {
+    this.ensureInitialized();
+    return { ...this.graph.getPatch(time) };
+  }
+
+  // Render a readable history summary for debugging/REPL use.
+  summarizeHistory(
+    opts: {
+      includeSnapshots?: boolean;
+      trunc?: number | null;
+      milliseconds?: boolean;
+      log?: (text: string) => void;
+      formatDoc?: (doc: Document) => string;
+    } = {},
+  ): string {
+    this.ensureInitialized();
+    const {
+      includeSnapshots = true,
+      trunc = 80,
+      milliseconds = false,
+      log,
+      formatDoc,
+    } = opts;
+
+    const truncMiddle = (s: string, n: number | null): string => {
+      if (n == null || n <= 0 || s.length <= n) return s;
+      if (n <= 3) return s.slice(0, n);
+      const half = Math.floor((n - 3) / 2);
+      return `${s.slice(0, half)}...${s.slice(s.length - half)}`;
+    };
+
+    const patches = this.history({ includeSnapshots });
+    const lines: string[] = [];
+    const emit = (text: string) => {
+      lines.push(text);
+      log?.(text);
+    };
+
+    patches.forEach((p, idx) => {
+      const wall = milliseconds
+        ? String(p.wall ?? p.time)
+        : new Date(p.wall ?? p.time).toISOString();
+      const parents = p.parents && p.parents.length > 0 ? ` parents=[${p.parents.join(",")}]` : "";
+      const patchStr = p.isSnapshot
+        ? `(snapshot len=${p.snapshot?.length ?? 0})`
+        : `(patch ${truncMiddle(JSON.stringify(p.patch), trunc)})`;
+      emit(
+        `${(idx + 1).toString().padStart(3, "0")} t=${p.time} v=${p.version ?? "-"} user=${p.userId ?? "-"} wall=${wall}${parents} ${patchStr}`,
+      );
+      const doc = this.graph.value({ time: p.time });
+      const docStr = formatDoc
+        ? formatDoc(doc)
+        : truncMiddle(this.codec.toString(doc).trim(), trunc);
+      const label = p.isSnapshot
+        ? "(SNAPSHOT)"
+        : (p.parents?.length ?? 0) > 1
+          ? "(MERGE)   "
+          : "          ";
+      emit(`${label} ${JSON.stringify(docStr)}`);
+    });
+
+    const currentDoc = this.codec.toString(this.getDocument()).trim();
+    emit(`\nCurrent: ${JSON.stringify(truncMiddle(currentDoc, trunc))}`);
+    return lines.join("\n");
+  }
+
   // Return the current document or throw if not initialized.
   getDocument(): Document {
-    if (!this.doc) {
-      throw new Error("session not initialized");
-    }
-    return this.doc;
+    this.ensureInitialized();
+    return this.doc!;
   }
 
   // Apply local change as a patch, persist, and publish presence.

@@ -13,6 +13,8 @@ export interface Patch {
   snapshot?: string;
   seqInfo?: { seq: number; prevSeq?: number };
   file?: boolean;
+  // Optional transport provenance.
+  source?: string;
 }
 
 // Immutable document contract used by the patch graph.

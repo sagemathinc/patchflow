@@ -277,8 +277,12 @@ const startPeer = async (role: Role, socket: Socket, args: Args) => {
     updateStaged(session.getDocument() as StringDocument);
     return stagedDoc.toString();
   };
+  globals.history = () => {
+    const out = session.summarizeHistory();
+    console.log(out);
+  };
   updateStaged(session.getDocument() as StringDocument);
-  console.log('Interactive helpers: set("text"), get(), commit(), getCommitted()');
+  console.log('Interactive helpers: set("text"), get(), commit(), getCommitted(), history()');
   if (process.stdin.isTTY) {
     repl.start();
   }

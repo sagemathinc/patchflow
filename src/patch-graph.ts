@@ -149,10 +149,12 @@ export class PatchGraph {
     );
   }
 
-  versions(): number[] {
+  versions(opts: { start?: number; end?: number } = {}): number[] {
+    const { start = -Infinity, end = Infinity } = opts;
     return this.patches
       .toArray()
       .map(([, patch]) => patch.time)
+      .filter((t) => t >= start && t <= end)
       .sort((a, b) => a - b);
   }
 
@@ -317,5 +319,15 @@ export class PatchGraph {
       }
       last = patch;
     }
+  }
+
+  history(opts: { start?: number; end?: number; includeSnapshots?: boolean } = {}): Patch[] {
+    const { start = -Infinity, end = Infinity, includeSnapshots = true } = opts;
+    return this.patches
+      .toArray()
+      .map(([, patch]) => patch)
+      .filter((p) => p.time >= start && p.time <= end)
+      .filter((p) => includeSnapshots || !p.isSnapshot)
+      .sort(patchCmp);
   }
 }
