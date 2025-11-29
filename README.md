@@ -2,7 +2,7 @@
 
 Patchflow is a lightweight patch-DAG sync core. It manages concurrent edits to a document by recording patches with ancestry, merging heads deterministically, and keeping an optional on-disk or transport adapter out of core. The goal is a small, well-tested engine that prioritizes correctness and “small revision history” over heavyweight state replication.
 
-**STATUS:** NOT YET READY FOR PRODUCTION \(Nov 2025\).
+**STATUS:** _NOT YET READY FOR PRODUCTION_ \(Nov 2025\).
 
 ## What’s inside
 
