@@ -7,6 +7,7 @@ import type {
   PatchStore,
   FileAdapter,
   PresenceAdapter,
+  PatchGraphValueOptions,
 } from "./types";
 
 export type SessionOptions = {
@@ -104,6 +105,12 @@ export class Session extends EventEmitter {
   versions(opts: { start?: number; end?: number } = {}): number[] {
     this.ensureInitialized();
     return this.graph.versions(opts);
+  }
+
+  // Compute the document at a specific version or with exclusions.
+  value(opts: PatchGraphValueOptions = {}): Document {
+    this.ensureInitialized();
+    return this.graph.value(opts);
   }
 
   // Return a sorted list of patches in the session, optionally filtered.
