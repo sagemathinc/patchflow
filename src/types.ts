@@ -4,7 +4,7 @@ import type { CompressedPatch } from "./dmp";
 export interface Patch {
   time: number;
   wall?: number;
-  patch?: CompressedPatch;
+  patch?: unknown;
   userId?: number;
   size?: number;
   parents?: number[];
@@ -17,8 +17,8 @@ export interface Patch {
 
 // Immutable document contract used by the patch graph.
 export interface Document {
-  applyPatch(patch: CompressedPatch): Document;
-  makePatch(other: Document): CompressedPatch;
+  applyPatch(patch: unknown): Document;
+  makePatch(other: Document): unknown;
   isEqual(other?: Document): boolean;
   toString(): string;
   set(value: unknown): Document;
@@ -32,8 +32,8 @@ export interface Document {
 export interface DocCodec {
   fromString(text: string): Document;
   toString(doc: Document): string;
-  applyPatch(doc: Document, patch: CompressedPatch): Document;
-  makePatch(a: Document, b: Document): CompressedPatch;
+  applyPatch(doc: Document, patch: unknown): Document;
+  makePatch(a: Document, b: Document): unknown;
 }
 
 export type MergeStrategy = "apply-all" | "three-way";
