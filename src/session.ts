@@ -48,6 +48,7 @@ export class Session extends EventEmitter {
   private dirtyContent?: string;
   private persistedContent?: string;
   private suppressFileChanges = 0;
+  private hasMoreHistory = false;
 
   private ensureInitialized(): void {
     if (!this.doc) {
@@ -69,7 +70,8 @@ export class Session extends EventEmitter {
 
   // Load initial history, seed state, and subscribe to adapters.
   async init(): Promise<void> {
-    const { patches } = await this.patchStore.loadInitial();
+    const { patches, hasMore } = await this.patchStore.loadInitial();
+    this.hasMoreHistory = !!hasMore;
     this.graph.add(patches);
     this.lastTime = this.computeLastTime();
     this.doc = this.graph.value();
@@ -99,6 +101,18 @@ export class Session extends EventEmitter {
     this.fileUnsubscribe?.();
     this.presenceAdapter?.publish(undefined);
     this.removeAllListeners();
+  }
+
+  // True if initial load included all history.
+  hasFullHistory(): boolean {
+    this.ensureInitialized();
+    return !this.hasMoreHistory;
+  }
+
+  // Mark that full history is now present (e.g., after incremental backfill).
+  markFullHistory(): void {
+    this.ensureInitialized();
+    this.hasMoreHistory = false;
   }
 
   // Return logical times (versions) in ascending order.
