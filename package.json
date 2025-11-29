@@ -1,10 +1,18 @@
 {
   "name": "patchflow",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
+  "private": false,
   "description": "Lightweight patch-DAG realtime sync core",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sagemathinc/patchflow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sagemathinc/patchflow/issues"
+  },
+  "homepage": "https://github.com/sagemathinc/patchflow#readme",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
   "types": "./dist/types/index.d.ts",

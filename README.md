@@ -48,4 +48,3 @@ When to reach for Yjs/Automerge:
 - Core patch graph, session, string and db documents (immutable + immer) are implemented with tests.
 - Examples cover in-memory and TCP/file flows.
 - Future: adapters for other transports, more document types, optional SQLite-backed doc, and stronger history/snapshot tooling.
-

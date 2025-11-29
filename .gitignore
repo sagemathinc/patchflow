@@ -3,3 +3,4 @@ dist
 coverage
 .tsbuildinfo
 *.term
+*.bash_history
