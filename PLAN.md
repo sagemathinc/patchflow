@@ -73,7 +73,7 @@ type SessionDeps = {
 
 1. \(done\) Lift `Document`/`Patch`/`SortedPatchList`\-equivalent into core modules with zero CoCalc deps.
 2. \(done\) Write in\-memory `PatchStore` \+ `DocCodec` \(string\) and port existing SortedPatchList tests; add coverage for merges, snapshots, undo/redo, value\(without\).
-3. Rebuild a slim `Session` around adapters; keep file/presence optional. Replace `reuseInFlight`\-style saves with a small dirty/queue state machine.
-4. Add file adapter \+ tests: overlapping saves, init/close races, remote patches arriving during disk write.
-5. Add presence adapter \(optional\) and keep it out of the core unless supplied.
+3. \(done\) Rebuild a slim `Session` around adapters; keep file/presence optional. Replace `reuseInFlight`\-style saves with a small dirty/queue state machine.
+4. \(done\) Add file adapter \+ tests: overlapping saves, init/close races, remote patches arriving during disk write.
+5. \(done\) Add presence adapter \(optional\) and keep it out of the core unless supplied.
 6. Integrate back into CoCalc via adapters \(conat\-backed PatchStore, FS/watch wrapper\), without reintroducing CoCalc\-specific code into the core.

@@ -131,13 +131,7 @@ export class Session extends EventEmitter {
     } = {},
   ): string {
     this.ensureInitialized();
-    const {
-      includeSnapshots = true,
-      trunc = 80,
-      milliseconds = false,
-      log,
-      formatDoc,
-    } = opts;
+    const { includeSnapshots = true, trunc = 80, milliseconds = false, log, formatDoc } = opts;
 
     const truncMiddle = (s: string, n: number | null): string => {
       if (n == null || n <= 0 || s.length <= n) return s;
@@ -188,7 +182,10 @@ export class Session extends EventEmitter {
   }
 
   // Apply local change as a patch, persist, and publish presence.
-  async commit(nextDoc: Document): Promise<PatchEnvelope> {
+  async commit(
+    nextDoc: Document,
+    opts: { file?: boolean; source?: string } = {},
+  ): Promise<PatchEnvelope> {
     if (!this.doc) {
       throw new Error("session not initialized");
     }
@@ -201,6 +198,8 @@ export class Session extends EventEmitter {
       parents: this.graph.getHeads(),
       userId: this.userId,
       version: this.graph.versions().length + 1,
+      file: opts.file,
+      source: opts.source,
     };
     this.graph.add([envelope]);
     this.doc = nextDoc;
