@@ -1,6 +1,6 @@
 {
   "name": "patchflow",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
   "description": "Lightweight patch-DAG realtime sync core",
   "license": "MIT",
@@ -27,7 +27,7 @@
     "prebuild": "rm -rf dist",
     "build": "pnpm build:types && pnpm build:esm && pnpm build:cjs",
     "build:esm": "rollup -c",
-    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/postbuild-cjs.cjs",
     "build:types": "tsc -p tsconfig.types.json",
     "test": "jest --runInBand",
     "clean": "rm -rf dist node_modules",
