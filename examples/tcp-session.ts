@@ -12,7 +12,7 @@
  *
  * Type commits in one process by editing the file; the other process will pick them up.
  * Add --stress to generate random edits on both peers to exercise merging.
- * Interactive helpers available: set("text"), get(), commit().
+ * Interactive helpers available: set("text") [staged only], get(), commit(), getCommitted().
  */
 import { createServer, createConnection, type Socket } from "node:net";
 import { dirname } from "node:path";
@@ -21,6 +21,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import repl from "node:repl";
 import { Session } from "../src/session";
 import { StringCodec, StringDocument } from "../src/string-document";
+import { rebaseDraft } from "../src/working-copy";
 import type { FileAdapter, PatchEnvelope, PatchStore } from "../src/types";
 
 type Role = "server" | "client";
@@ -183,12 +184,6 @@ class SocketPatchStore implements PatchStore {
   }
 }
 
-const logChange = (label: string, session: Session) => {
-  session.on("change", (doc) => {
-    console.log(`[${label}] doc -> "${doc.toString()}"`);
-  });
-};
-
 const applyInitialFile = async (session: Session, file: PollingFileAdapter) => {
   const text = await file.read();
   if (text) {
@@ -241,26 +236,49 @@ const startPeer = async (role: Role, socket: Socket, args: Args) => {
     fileAdapter,
   });
 
-  logChange(role, session);
   await session.init();
   await applyInitialFile(session, fileAdapter);
+
+  // Track staged (uncommitted) edits and rebase them when the committed doc changes.
+  let stagedBase = session.getDocument() as StringDocument;
+  let stagedDoc = stagedBase;
+  const updateStaged = (nextBase: StringDocument) => {
+    stagedBase = nextBase;
+    stagedDoc = nextBase;
+  };
+  const rebaseStaged = (nextBase: StringDocument) => {
+    stagedDoc = rebaseDraft({
+      base: stagedBase,
+      draft: stagedDoc,
+      updatedBase: nextBase,
+    }) as StringDocument;
+    stagedBase = nextBase;
+  };
+  session.on("change", (doc) => {
+    const nextBase = doc as StringDocument;
+    rebaseStaged(nextBase);
+    console.log(`[${role}] doc -> "${nextBase.toString()}"`);
+  });
 
   if (args.stress) {
     startStress(session, role);
   }
   // Expose simple helpers for interactive use.
   const globals = globalThis as any;
-  let staged = session.getDocument().toString();
   globals.set = (text: string) => {
-    staged = text;
-    return staged;
+    stagedBase = session.getDocument() as StringDocument;
+    stagedDoc = new StringDocument(text);
+    return stagedDoc.toString();
   };
-  globals.get = () => session.getDocument().toString();
+  globals.get = () => stagedDoc.toString();
+  globals.getCommitted = () => session.getDocument().toString();
   globals.commit = async () => {
-    await session.commit(new StringDocument(staged));
-    return session.getDocument().toString();
+    await session.commit(stagedDoc);
+    updateStaged(session.getDocument() as StringDocument);
+    return stagedDoc.toString();
   };
-  console.log('Interactive helpers: set("text"), get(), commit()');
+  updateStaged(session.getDocument() as StringDocument);
+  console.log('Interactive helpers: set("text"), get(), commit(), getCommitted()');
   if (process.stdin.isTTY) {
     repl.start();
   }

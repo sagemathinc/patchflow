@@ -58,7 +58,11 @@
   },
   "ts-node": {
     "esm": {
-      "resolveExtensions": [".ts", ".tsx", ".js"],
+      "resolveExtensions": [
+        ".ts",
+        ".tsx",
+        ".js"
+      ],
       "experimentalSpecifierResolution": "node",
       "preferTsExts": true
     },
