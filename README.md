@@ -4,6 +4,9 @@ Patchflow is a lightweight patch-DAG sync core. It manages concurrent edits to a
 
 **STATUS:** _NOT YET READY FOR PRODUCTION_ \(Nov 2025\).
 
+- https://www.npmjs.com/package/patchflow
+- https://github.com/sagemathinc/patchflow
+
 ## What’s inside
 
 - Core patch DAG: [src/patch-graph.ts](./src/patch-graph.ts) handles patch ancestry, head detection, three-way merges, snapshots, and file-load dedup.
@@ -31,6 +34,12 @@ When to reach for Yjs/Automerge:
 
 - You need large-scale, high-frequency character-level collaboration with built-in awareness, awareness messages, and rich CRDT types.
 - You want mature ecosystem integrations (rich text editors, awareness protocols) and are willing to manage CRDT GC/compaction separately.
+
+## Quickstart (from npm)
+
+```sh
+npm install patchflow
+```
 
 ## Getting started
 
