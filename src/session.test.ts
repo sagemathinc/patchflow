@@ -110,6 +110,23 @@ describe("Session", () => {
     expect(seen.length).toBeGreaterThanOrEqual(3);
   });
 
+  it("sends presence offline on close when presence adapter is present", async () => {
+    const store = new MemoryPatchStore();
+    const presence = new MemoryPresenceAdapter();
+    const seen: unknown[] = [];
+    presence.subscribe((state) => seen.push(state));
+    const session = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      presenceAdapter: presence,
+    });
+    await session.init();
+    await session.commit(new StringDocument("P"));
+    session.close();
+    expect(seen.some((s) => s === undefined)).toBe(true);
+  });
+
   it("queues file writes sequentially without overlap", async () => {
     const store = new MemoryPatchStore();
     let current = "";
