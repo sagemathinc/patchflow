@@ -1,5 +1,6 @@
 import { List, Map } from "immutable";
-import { threeWayMerge } from "./dmp";
+import { rebaseDraft } from "./working-copy";
+import { StringDocument } from "./string-document";
 import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions } from "./types";
 
 type PatchMap = Map<number, Patch>;
@@ -238,12 +239,13 @@ export class PatchGraph {
       const baseDoc =
         baseTime != null ? this.applyAllValue([baseTime], without) : this.codec.fromString("");
       const remoteDoc = this.applyAllValue([head], without);
-      const mergedText = threeWayMerge({
-        base: this.codec.toString(baseDoc),
-        local: this.codec.toString(mergedDoc),
-        remote: this.codec.toString(remoteDoc),
+      mergedDoc = rebaseDraft({
+        base: baseDoc,
+        draft: mergedDoc,
+        updatedBase: remoteDoc,
+        stringifier: (doc) =>
+          doc instanceof StringDocument ? this.codec.toString(doc) : undefined,
       });
-      mergedDoc = this.codec.fromString(mergedText);
       mergedAncestors = new Set([...mergedAncestors, ...headAncestors]);
     }
 

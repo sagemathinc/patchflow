@@ -3,6 +3,8 @@ import type { Document } from "./types";
 
 export class StringDocument implements Document {
   private readonly value: string;
+  // Marker so helpers can safely detect string docs without inspecting arbitrary toString() output.
+  public readonly __stringDoc: true = true;
 
   constructor(value = "") {
     this.value = value;
