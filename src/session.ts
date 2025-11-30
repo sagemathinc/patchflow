@@ -268,7 +268,6 @@ export class Session extends EventEmitter {
 
   // Merge a remote patch and refresh the current document.
   applyRemote(env: PatchEnvelope): void {
-    this.emit("before-change", env);
     this.graph.add([env]);
     this.lastTime = Math.max(this.lastTime, env.time);
     this.syncDoc();
