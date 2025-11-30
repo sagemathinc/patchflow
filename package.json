@@ -1,6 +1,6 @@
 {
   "name": "patchflow",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "private": false,
   "description": "Lightweight patch-DAG realtime sync core",
   "license": "MIT",
