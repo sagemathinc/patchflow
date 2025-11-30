@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
 import { PatchGraph } from "./patch-graph";
+import { rebaseDraft } from "./working-copy";
 import type {
   DocCodec,
   Document,
@@ -41,7 +42,8 @@ export class Session extends EventEmitter {
   private readonly fileAdapter?: FileAdapter;
   private readonly presenceAdapter?: PresenceAdapter;
   private readonly docId?: string;
-  private doc?: Document;
+  private doc?: Document; // live doc (committed + staged)
+  private committedDoc?: Document; // graph-derived doc without staged edits
   private lastTime: number = 0;
   private userId: number;
 
@@ -57,6 +59,7 @@ export class Session extends EventEmitter {
   private cursorTtlMs = 60_000;
   private cursorStates: Map<string, CursorSnapshot> = new Map();
   private cursorPruneTimer?: NodeJS.Timeout;
+  private workingCopy?: { base: Document; draft: Document };
 
   private ensureInitialized(): void {
     if (!this.doc) {
@@ -83,7 +86,8 @@ export class Session extends EventEmitter {
     this.hasMoreHistory = !!hasMore;
     this.graph.add(patches);
     this.lastTime = this.computeLastTime();
-    this.doc = this.graph.value();
+    this.committedDoc = this.graph.value();
+    this.doc = this.committedDoc;
     if (this.fileAdapter && this.doc) {
       // Track current doc string so we can skip redundant writes.
       this.persistedContent = this.codec.toString(this.doc);
@@ -220,15 +224,22 @@ export class Session extends EventEmitter {
     return this.doc!;
   }
 
+  // Return the committed document (graph value without staged edits).
+  getCommittedDocument(): Document {
+    this.ensureInitialized();
+    return this.committedDoc ?? this.doc!;
+  }
+
   // Apply local change as a patch, persist, and publish presence.
   async commit(
     nextDoc: Document,
     opts: { file?: boolean; source?: string } = {},
   ): Promise<PatchEnvelope> {
-    if (!this.doc) {
+    if (!this.committedDoc) {
       throw new Error("session not initialized");
     }
-    const patch = this.codec.makePatch(this.doc, nextDoc);
+    const base = this.workingCopy?.base ?? this.committedDoc;
+    const patch = this.codec.makePatch(base, nextDoc);
     const time = this.nextTime();
     const envelope: PatchEnvelope = {
       time,
@@ -241,7 +252,9 @@ export class Session extends EventEmitter {
       source: opts.source,
     };
     this.graph.add([envelope]);
+    this.committedDoc = nextDoc;
     this.doc = nextDoc;
+    this.workingCopy = undefined;
     // Reset undo future and record this local change.
     this.localTimes = this.localTimes.slice(0, this.undoPtr);
     this.localTimes.push(time);
@@ -255,10 +268,6 @@ export class Session extends EventEmitter {
 
   // Merge a remote patch and refresh the current document.
   applyRemote(env: PatchEnvelope): void {
-    if (this.localTimes.includes(env.time)) {
-      // Echo of a local patch; already applied.
-      return;
-    }
     this.emit("before-change", env);
     this.graph.add([env]);
     this.lastTime = Math.max(this.lastTime, env.time);
@@ -302,6 +311,23 @@ export class Session extends EventEmitter {
     this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
   }
 
+  // Record a staged working copy of the document. Does not append to history.
+  setWorkingCopy(draft: Document): void {
+    this.ensureInitialized();
+    const base = this.committedDoc ?? this.doc!;
+    this.workingCopy = { base, draft };
+    this.doc = draft;
+    this.emit("change", this.doc);
+  }
+
+  // Clear any staged working copy and return to the committed version.
+  clearWorkingCopy(): void {
+    this.ensureInitialized();
+    this.workingCopy = undefined;
+    this.doc = this.committedDoc;
+    this.emit("change", this.doc!);
+  }
+
   // Publish a cursor update for this session/user.
   updateCursors(locs: unknown): void {
     this.ensureInitialized();
@@ -326,11 +352,23 @@ export class Session extends EventEmitter {
     return Array.from(this.cursorStates.values());
   }
 
-  // Recompute the current document (respecting undo/redo), emit change, and enqueue a file write if needed.
+  // Recompute the current document (respecting undo/redo), rebase any staged working copy,
+  // emit change, and enqueue a file write if needed.
   private syncDoc(): void {
     const without = this.withoutTimes();
-    this.doc = this.graph.value({ withoutTimes: without });
-    const text = this.codec.toString(this.doc);
+    const baseDoc = this.graph.value({ withoutTimes: without });
+    this.committedDoc = baseDoc;
+    let liveDoc = baseDoc;
+    if (this.workingCopy) {
+      liveDoc = rebaseDraft({
+        base: this.workingCopy.base as Document,
+        draft: this.workingCopy.draft as Document,
+        updatedBase: baseDoc,
+      }) as Document;
+      this.workingCopy = { base: baseDoc, draft: liveDoc };
+    }
+    this.doc = liveDoc;
+    const text = this.codec.toString(liveDoc);
     this.emit("change", this.doc);
 
     // If a file adapter is present, keep it in sync

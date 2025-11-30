@@ -28,6 +28,28 @@ describe("Session", () => {
     expect(sessionA.getDocument().toString()).toBe("hello world");
   });
 
+  it("rebases a staged working copy across remote patches", async () => {
+    const store = new MemoryPatchStore();
+    const sessionA = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
+    const sessionB = new Session({ codec: StringCodec, patchStore: store, userId: 2 });
+    await sessionA.init();
+    await sessionB.init();
+
+    await sessionA.commit(new StringDocument("hello"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sessionB.getDocument().toString()).toBe("hello");
+
+    sessionB.setWorkingCopy(new StringDocument("hello local"));
+
+    await sessionA.commit(new StringDocument("REMOTE hello"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sessionB.getDocument().toString()).toBe("REMOTE hello local");
+
+    await sessionB.commit(sessionB.getDocument());
+    expect(sessionB.versions().length).toBe(3);
+  });
+
   it("supports undo/redo of local commits", async () => {
     const store = new MemoryPatchStore();
     const session = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
