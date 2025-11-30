@@ -1,18 +1,20 @@
 import type { PresenceAdapter } from "../types";
 
 export class MemoryPresenceAdapter implements PresenceAdapter {
-  private listeners: ((state: unknown, clientId: string) => void)[] = [];
+  private listeners: { fn: (state: unknown, clientId: string) => void; id: string }[] = [];
+  private counter = 0;
 
   publish(state: unknown): void {
-    for (const fn of this.listeners) {
-      fn(state, "memory");
+    for (const { fn, id } of this.listeners) {
+      fn(state, id);
     }
   }
 
   subscribe(onState: (state: unknown, clientId: string) => void): () => void {
-    this.listeners.push(onState);
+    const id = `memory-${++this.counter}`;
+    this.listeners.push({ fn: onState, id });
     return () => {
-      this.listeners = this.listeners.filter((fn) => fn !== onState);
+      this.listeners = this.listeners.filter((entry) => entry.fn !== onState);
     };
   }
 }

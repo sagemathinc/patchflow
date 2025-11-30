@@ -70,3 +70,15 @@ export interface PresenceAdapter {
   publish(state: unknown): void;
   subscribe(onState: (state: unknown, clientId: string) => void): () => void;
 }
+
+export interface CursorPresence {
+  type: "cursor";
+  time: number;
+  locs: unknown;
+  userId?: number;
+  docId?: string;
+}
+
+export interface CursorSnapshot extends CursorPresence {
+  clientId: string;
+}

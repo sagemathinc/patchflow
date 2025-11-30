@@ -8,6 +8,8 @@ import type {
   FileAdapter,
   PresenceAdapter,
   PatchGraphValueOptions,
+  CursorSnapshot,
+  CursorPresence,
 } from "./types";
 
 export type SessionOptions = {
@@ -19,6 +21,8 @@ export type SessionOptions = {
   clock?: () => number;
   // Optional local user id, propagated on emitted patches/presence.
   userId?: number;
+  // Optional document identifier for presence scoping (e.g., path or id).
+  docId?: string;
   // Optional file adapter to mirror the current doc to disk and watch for external edits.
   fileAdapter?: FileAdapter;
   // Optional presence adapter to publish/receive lightweight presence state.
@@ -36,6 +40,7 @@ export class Session extends EventEmitter {
   private readonly graph: PatchGraph;
   private readonly fileAdapter?: FileAdapter;
   private readonly presenceAdapter?: PresenceAdapter;
+  private readonly docId?: string;
   private doc?: Document;
   private lastTime: number = 0;
   private userId: number;
@@ -49,6 +54,9 @@ export class Session extends EventEmitter {
   private persistedContent?: string;
   private suppressFileChanges = 0;
   private hasMoreHistory = false;
+  private cursorTtlMs = 60_000;
+  private cursorStates: Map<string, CursorSnapshot> = new Map();
+  private cursorPruneTimer?: NodeJS.Timeout;
 
   private ensureInitialized(): void {
     if (!this.doc) {
@@ -63,6 +71,7 @@ export class Session extends EventEmitter {
     this.patchStore = opts.patchStore;
     this.clock = opts.clock ?? (() => Date.now());
     this.userId = opts.userId ?? 0;
+    this.docId = opts.docId;
     this.fileAdapter = opts.fileAdapter;
     this.presenceAdapter = opts.presenceAdapter;
     this.graph = new PatchGraph({ codec: this.codec });
@@ -85,7 +94,12 @@ export class Session extends EventEmitter {
     });
     if (this.presenceAdapter) {
       this.presenceAdapter.subscribe((state, clientId) => {
-        this.emit("presence", state, clientId);
+        if (this.isCursorPresence(state)) {
+          this.ingestCursorState({ ...state, clientId });
+          this.emit("cursors", this.cursors());
+        } else {
+          this.emit("presence", state, clientId);
+        }
       });
     }
     if (this.fileAdapter?.watch) {
@@ -100,6 +114,10 @@ export class Session extends EventEmitter {
     this.unsubscribe?.();
     this.fileUnsubscribe?.();
     this.presenceAdapter?.publish(undefined);
+    if (this.cursorPruneTimer) {
+      clearTimeout(this.cursorPruneTimer);
+    }
+    this.cursorStates.clear();
     this.removeAllListeners();
   }
 
@@ -260,6 +278,30 @@ export class Session extends EventEmitter {
     this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
   }
 
+  // Publish a cursor update for this session/user.
+  updateCursors(locs: unknown): void {
+    this.ensureInitialized();
+    if (!this.presenceAdapter) return;
+    const time = this.clock();
+    const payload: CursorPresence = {
+      type: "cursor",
+      time,
+      locs,
+      userId: this.userId,
+      docId: this.docId,
+    };
+    this.ingestCursorState({ ...payload, clientId: this.localCursorId() });
+    this.emit("cursors", this.cursors());
+    this.presenceAdapter.publish(payload);
+  }
+
+  // Return recent cursor states, filtered by TTL.
+  cursors(opts: { ttlMs?: number } = {}): CursorSnapshot[] {
+    this.ensureInitialized();
+    this.pruneCursors(opts.ttlMs ?? this.cursorTtlMs);
+    return Array.from(this.cursorStates.values());
+  }
+
   // Recompute the current document (respecting undo/redo), emit change, and enqueue a file write if needed.
   private syncDoc(): void {
     const without = this.withoutTimes();
@@ -277,6 +319,50 @@ export class Session extends EventEmitter {
   private withoutTimes(): number[] {
     if (this.undoPtr >= this.localTimes.length) return [];
     return this.localTimes.slice(this.undoPtr);
+  }
+
+  // Detect and store cursor presence payloads.
+  private ingestCursorState(state: CursorPresence & { clientId?: string }): void {
+    if (this.docId && state.docId && state.docId !== this.docId) {
+      return;
+    }
+    const clientId = this.cursorKey(state);
+    this.cursorStates.set(clientId, { ...state, clientId });
+    this.pruneCursors();
+    this.emit("cursors", this.cursors());
+  }
+
+  private isCursorPresence(state: unknown): state is CursorPresence {
+    if (!state || typeof state !== "object") return false;
+    const obj = state as Record<string, unknown>;
+    return obj.type === "cursor" && typeof obj.time === "number" && "locs" in obj;
+  }
+
+  private localCursorId(): string {
+    return `local-${this.userId ?? "anon"}`;
+  }
+
+  private cursorKey(state: CursorPresence & { clientId?: string }): string {
+    if (state.userId != null) {
+      return `user-${state.userId}`;
+    }
+    return state.clientId ?? this.localCursorId();
+  }
+
+  private pruneCursors(ttlMs: number = this.cursorTtlMs): void {
+    const now = this.clock();
+    for (const [id, c] of Array.from(this.cursorStates.entries())) {
+      if (ttlMs && now - c.time > ttlMs) {
+        this.cursorStates.delete(id);
+      }
+    }
+    if (this.cursorPruneTimer) {
+      clearTimeout(this.cursorPruneTimer);
+    }
+    if (ttlMs) {
+      this.cursorPruneTimer = setTimeout(() => this.pruneCursors(ttlMs), ttlMs);
+      this.cursorPruneTimer.unref?.();
+    }
   }
 
   // Compute the latest logical time from the graph.

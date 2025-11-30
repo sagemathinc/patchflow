@@ -3,6 +3,7 @@ import { StringCodec, StringDocument } from "./string-document";
 import { MemoryPatchStore } from "./adapters/memory-patch-store";
 import { MemoryFileAdapter } from "./adapters/memory-file-adapter";
 import { MemoryPresenceAdapter } from "./adapters/memory-presence-adapter";
+import type { CursorSnapshot } from "./types";
 
 describe("Session", () => {
   it("commits and merges remote patches", async () => {
@@ -125,6 +126,58 @@ describe("Session", () => {
     await session.commit(new StringDocument("P"));
     session.close();
     expect(seen.some((s) => s === undefined)).toBe(true);
+  });
+
+  it("broadcasts cursor presence via presence adapter", async () => {
+    const store = new MemoryPatchStore();
+    const presence = new MemoryPresenceAdapter();
+    const sessionA = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      presenceAdapter: presence,
+      docId: "doc",
+    });
+    const sessionB = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 2,
+      presenceAdapter: presence,
+      docId: "doc",
+    });
+    await sessionA.init();
+    await sessionB.init();
+
+    const seen: CursorSnapshot[][] = [];
+    sessionB.on("cursors", (states: CursorSnapshot[]) => seen.push(states));
+
+    sessionA.updateCursors([{ pos: 1 }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const states = sessionB.cursors();
+    expect(states.length).toBe(1);
+    expect(states[0].locs).toEqual([{ pos: 1 }]);
+    expect(seen.length).toBeGreaterThan(0);
+  });
+
+  it("drops stale cursor presence after TTL", async () => {
+    let now = 0;
+    const clock = () => now;
+    const store = new MemoryPatchStore();
+    const presence = new MemoryPresenceAdapter();
+    const session = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 1,
+      presenceAdapter: presence,
+      docId: "doc",
+      clock,
+    });
+    await session.init();
+    session.updateCursors([{ pos: 1 }]);
+    expect(session.cursors({ ttlMs: 1000 }).length).toBe(1);
+    now = 2000;
+    expect(session.cursors({ ttlMs: 1000 }).length).toBe(0);
   });
 
   it("queues file writes sequentially without overlap", async () => {
@@ -268,6 +321,6 @@ describe("Session", () => {
     session.on("presence", (state, id) => seen.push({ state, id: id as string }));
     await session.init();
     presence.publish({ status: "online" });
-    expect(seen).toEqual([{ state: { status: "online" }, id: "memory" }]);
+    expect(seen).toEqual([{ state: { status: "online" }, id: "memory-1" }]);
   });
 });
