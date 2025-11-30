@@ -1,3 +1,4 @@
+import { threeWayMerge } from "./dmp";
 import type { Document } from "./types";
 
 /**
@@ -22,24 +23,29 @@ export function rebaseDraft<T extends Document>({
     return updatedBase;
   }
   // For string-like documents, use a true three-way merge to avoid duplicate application.
-  const baseStr = (base as any).toString?.();
-  const draftStr = (draft as any).toString?.();
-  const updatedStr = (updatedBase as any).toString?.();
+  const baseStr = base.toString?.();
+  const draftStr = draft.toString?.();
+  const updatedStr = updatedBase.toString?.();
   if (
     typeof baseStr === "string" &&
     typeof draftStr === "string" &&
     typeof updatedStr === "string"
   ) {
-    const { threeWayMerge } = require("./dmp") as typeof import("./dmp");
     const merged = threeWayMerge({ base: baseStr, local: draftStr, remote: updatedStr });
-    const setter =
-      (updatedBase as any).set ??
-      ((x: string) => {
-        const Ctor = (updatedBase as any).constructor;
-        return new Ctor(x);
-      });
     try {
-      return setter.call(updatedBase, merged) as T;
+      const setter =
+        typeof (updatedBase as Document).set === "function"
+          ? (updatedBase as Document).set.bind(updatedBase)
+          : undefined;
+      if (setter) {
+        return setter(merged) as T;
+      }
+      const Ctor = (
+        updatedBase as unknown as {
+          constructor: new (x: string) => Document;
+        }
+      ).constructor;
+      return new Ctor(merged) as T;
     } catch {
       // fall through to patch-based rebase
     }
