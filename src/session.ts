@@ -261,20 +261,39 @@ export class Session extends EventEmitter {
   }
 
   // Step the undo pointer backward and recompute the doc.
-  undo(): void {
-    if (this.undoPtr === 0) return;
-    this.undoPtr -= 1;
-    this.syncDoc();
-    this.emit("undo", this.doc);
-    this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
+  undo(): Document {
+    if (this.undoPtr > 0) {
+      this.undoPtr -= 1;
+      this.syncDoc();
+      this.emit("undo", this.doc);
+      this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
+    }
+    return this.getDocument();
   }
 
   // Step the undo pointer forward and recompute the doc.
-  redo(): void {
-    if (this.undoPtr === this.localTimes.length) return;
-    this.undoPtr += 1;
+  redo(): Document {
+    if (this.undoPtr < this.localTimes.length) {
+      this.undoPtr += 1;
+      this.syncDoc();
+      this.emit("redo", this.doc);
+      this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
+    }
+    return this.getDocument();
+  }
+
+  // Return undo pointer and local history for callers that need to mirror undo UI.
+  undoState(): { undoPtr: number; localTimes: number[] } {
+    return {
+      undoPtr: this.undoPtr,
+      localTimes: [...this.localTimes],
+    };
+  }
+
+  // Reset undo pointer to the top (exit undo mode).
+  resetUndo(): void {
+    this.undoPtr = this.localTimes.length;
     this.syncDoc();
-    this.emit("redo", this.doc);
     this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
   }
 

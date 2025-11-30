@@ -20,7 +20,7 @@ PatchFlow is a lightweight patch-DAG sync core. It manages concurrent edits to a
 ## How it differs from CRDTs like Yjs/Automerge
 
 - Simpler model: PatchFlow stores a directed acyclic graph (DAG) of patches and replays/merges with three-way merge for divergent heads. It doesn’t maintain per-character CRDT metadata; patches are diffs (diff-match-patch for strings; structured patches for db-doc).
-   - NOTE: there are numerous buggy forks of diff-match-patch circulating, and PatchFlow uses [our own fork](https://www.npmjs.com/package/@cocalc/diff-match-patch), which fixes all known bugs, including the timeout not working and issues with unicode pairs.
+  - NOTE: there are numerous buggy forks of diff-match-patch circulating, and PatchFlow uses [our own fork](https://www.npmjs.com/package/@cocalc/diff-match-patch), which fixes all known bugs, including the timeout not working and issues with unicode pairs.
 - Small history focus: PatchFlow is built to mirror “revision control” with a compact patch log and explicit snapshots, rather than a grow-only CRDT state that needs periodic GC.
 - Transport/storage agnostic: Core doesn’t bake in a wire format or network layer; you provide a PatchStore and optional File/Presence adapters.
 - Merge semantics: For string columns, PatchFlow uses diff-match-patch to create/apply patches; map fields use shallow merge with delete markers. CRDTs often aim for highly concurrent character-level edits with strong causality metadata; PatchFlow favors deterministic replay with simple merges and a small log.
