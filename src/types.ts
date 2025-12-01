@@ -1,5 +1,14 @@
 import type { CompressedPatch } from "./dmp";
 
+// Ingestion assumptions (handled by adapters/transports, kept out of core):
+// - Patch.time is unique within a graph (dedupe at the PatchStore boundary).
+// - Parents must already exist or be delivered alongside the patch; children are not delivered
+//   without ancestors. If history is truncated, loadInitial must return hasMore=true.
+// - Snapshot metadata is inline: when isSnapshot is true, snapshot/seqInfo are present on the
+//   same envelope (no separate “snapshot message” later).
+// - Patches are immutable once appended; transports may replay envelopes idempotently but must
+//   not mutate existing patches.
+// - Adapters provide a consistent ordering signal (time/wall/version) and do not reorder parents.
 // A Patch represents a change with logical time and ancestry.
 export interface Patch {
   time: number;
