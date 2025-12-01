@@ -1,6 +1,4 @@
 import { List, Map } from "immutable";
-import { rebaseDraft } from "./working-copy";
-import { StringDocument } from "./string-document";
 import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions } from "./types";
 
 type PatchMap = Map<number, Patch>;
@@ -182,7 +180,9 @@ export class PatchGraph {
     }
     const strategy = opts.mergeStrategy ?? this.mergeStrategy;
     if (headTimes.length > 1 && strategy === "three-way") {
-      return this.mergeHeadsThreeWay(headTimes, without);
+      // Merge by replaying all patches reachable from the heads in timestamp order.
+      // This avoids stringifying documents and relies solely on codec.applyPatch.
+      return this.applyAllValue(headTimes, without);
     }
     return this.applyAllValue(headTimes, without);
   }
@@ -218,38 +218,6 @@ export class PatchGraph {
       doc = this.codec.applyPatch(doc, patch.patch);
     }
     return doc;
-  }
-
-  private mergeHeadsThreeWay(headTimes: number[], without: Set<number>): Document {
-    // Merge multiple heads by repeatedly 3-way merging them:
-    // 1) Order heads deterministically (time/version/user tie-break).
-    // 2) Start from the first head's value; track its ancestor set.
-    // 3) For each subsequent head, find newest common ancestor between the
-    //    accumulated merge and that head, compute base/local/remote strings,
-    //    and run a diff-match-patch 3-way merge.
-    // 4) Repeat until all heads are merged. This mirrors the Mercurial-like
-    //    notion of merging heads one at a time while preserving the DAG.
-    const orderedHeads = this.sortHeads(headTimes);
-    let mergedDoc = this.applyAllValue([orderedHeads[0]], without);
-    let mergedAncestors = this.knownTimes([orderedHeads[0]]);
-
-    for (const head of orderedHeads.slice(1)) {
-      const headAncestors = this.knownTimes([head]);
-      const baseTime = this.newestCommonAncestor(mergedAncestors, headAncestors);
-      const baseDoc =
-        baseTime != null ? this.applyAllValue([baseTime], without) : this.codec.fromString("");
-      const remoteDoc = this.applyAllValue([head], without);
-      mergedDoc = rebaseDraft({
-        base: baseDoc,
-        draft: mergedDoc,
-        updatedBase: remoteDoc,
-        stringifier: (doc) =>
-          doc instanceof StringDocument ? this.codec.toString(doc) : undefined,
-      });
-      mergedAncestors = new Set([...mergedAncestors, ...headAncestors]);
-    }
-
-    return mergedDoc;
   }
 
   private sortHeads(headTimes: number[]): number[] {

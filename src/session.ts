@@ -1,7 +1,6 @@
 import { EventEmitter } from "events";
 import { PatchGraph } from "./patch-graph";
 import { rebaseDraft } from "./working-copy";
-import { StringDocument } from "./string-document";
 import type {
   DocCodec,
   Document,
@@ -364,8 +363,6 @@ export class Session extends EventEmitter {
         base: this.workingCopy.base as Document,
         draft: this.workingCopy.draft as Document,
         updatedBase: baseDoc,
-        stringifier: (doc) =>
-          doc instanceof StringDocument ? this.codec.toString(doc) : undefined,
       }) as Document;
       this.workingCopy = { base: baseDoc, draft: liveDoc };
     }
