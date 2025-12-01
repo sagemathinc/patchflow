@@ -58,6 +58,7 @@
     "events": "^3.3.0",
     "immer": "^10.2.0",
     "immutable": "^4.3.0",
+    "lru-cache": "^11.0.1",
     "save-dev": "0.0.1-security"
   },
   "devDependencies": {

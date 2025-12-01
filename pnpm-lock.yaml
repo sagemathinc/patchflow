@@ -19,6 +19,9 @@ importers:
       immutable:
         specifier: ^4.3.0
         version: 4.3.7
+      lru-cache:
+        specifier: ^11.0.1
+        version: 11.2.4
       save-dev:
         specifier: 0.0.1-security
         version: 0.0.1-security
@@ -2338,6 +2341,13 @@ packages:
       {
         integrity: sha512-0KpjqXRVvrYyCsX1swR/XTK0va6VQkQM6MNo7PqW77ByjAhoARA8EfrP1N4+KlKj8YS0ZUCtRT/YUuhyYDujIQ==,
       }
+
+  lru-cache@11.2.4:
+    resolution:
+      {
+        integrity: sha512-B5Y16Jr9LB9dHVkh6ZevG+vAbOsNOYCX+sXvFWFu7B3Iz5mijW3zdbMyhsh8ANd2mSWBYdJgnqi+mL7/LrOPYg==,
+      }
+    engines: { node: 20 || >=22 }
 
   lru-cache@5.1.1:
     resolution:
@@ -4804,6 +4814,8 @@ snapshots:
   lodash.memoize@4.1.2: {}
 
   lodash.merge@4.6.2: {}
+
+  lru-cache@11.2.4: {}
 
   lru-cache@5.1.1:
     dependencies:

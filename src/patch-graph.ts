@@ -1,4 +1,5 @@
 import { List, Map } from "immutable";
+import { LRUCache } from "lru-cache";
 import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions } from "./types";
 
 type PatchMap = Map<number, Patch>;
@@ -21,6 +22,19 @@ export class PatchGraph {
   private codec: DocCodec;
   public fileTimeDedupTolerance = DEFAULT_DEDUP_TOLERANCE;
   private mergeStrategy: MergeStrategy;
+  // Cache single-head values keyed by patch time with a completeness count to avoid full replays.
+  private valueCache = new LRUCache<number, { doc: Document; count: number }>({
+    max: 256,
+  });
+  // Cache reachability/topo for single heads.
+  private reachabilityCache = new globalThis.Map<
+    number,
+    { reachable: Set<number>; ordered: number[] }
+  >();
+  // Cache merged docs for multi-head evaluations with no exclusions.
+  private mergeCache = new globalThis.Map<string, Document>();
+  // Cache versions list.
+  private versionsCache?: number[];
 
   constructor(opts: { codec: DocCodec; mergeStrategy?: MergeStrategy }) {
     this.codec = opts.codec;
@@ -54,6 +68,10 @@ export class PatchGraph {
         this.children = this.children.set(parent, kids);
       }
     }
+    // Any structural change invalidates cached reachability/versions/merges.
+    this.reachabilityCache.clear();
+    this.mergeCache.clear();
+    this.versionsCache = undefined;
   }
 
   getHeads(): number[] {
@@ -150,11 +168,13 @@ export class PatchGraph {
 
   versions(opts: { start?: number; end?: number } = {}): number[] {
     const { start = -Infinity, end = Infinity } = opts;
-    return this.patches
-      .toArray()
-      .map(([, patch]) => patch.time)
-      .filter((t) => t >= start && t <= end)
-      .sort((a, b) => a - b);
+    if (this.versionsCache == null) {
+      this.versionsCache = this.patches
+        .toArray()
+        .map(([, patch]) => patch.time)
+        .sort((a, b) => a - b);
+    }
+    return this.versionsCache.filter((t) => t >= start && t <= end);
   }
 
   versionsInRange(opts: { start?: number; end?: number } = {}): number[] {
@@ -178,17 +198,54 @@ export class PatchGraph {
     if (headTimes.length === 0) {
       return this.codec.fromString("");
     }
-    const strategy = opts.mergeStrategy ?? this.mergeStrategy;
-    if (headTimes.length > 1 && strategy === "three-way") {
-      // Merge by replaying all patches reachable from the heads in timestamp order.
-      // This avoids stringifying documents and relies solely on codec.applyPatch.
-      return this.applyAllValue(headTimes, without);
+    // Fast path: single head, no exclusions; reuse cached prefix if reachability unchanged.
+    if (without.size === 0 && headTimes.length === 1) {
+      const head = headTimes[0];
+      const doc = this.applyAllValue([head], without, true);
+      return doc;
     }
+
+    if (headTimes.length > 1 && without.size === 0) {
+      const key = headTimes
+        .slice()
+        .sort((a, b) => a - b)
+        .join(",");
+      const cached = this.mergeCache.get(key);
+      if (cached) {
+        return cached;
+      }
+      const doc = this.applyAllValue(headTimes, without, false, true);
+      this.mergeCache.set(key, doc);
+      return doc;
+    }
+
     return this.applyAllValue(headTimes, without);
   }
 
-  private applyAllValue(headTimes: number[], without: Set<number>): Document {
-    const reachable = this.knownTimes(headTimes);
+  private applyAllValue(
+    headTimes: number[],
+    without: Set<number>,
+    useCache: boolean = false,
+    allowMergeCache: boolean = false,
+  ): Document {
+    let reachable: Set<number>;
+    let orderedTimes: number[] | undefined;
+    if (useCache && headTimes.length === 1 && without.size === 0) {
+      const cachedReach = this.reachabilityCache.get(headTimes[0]);
+      if (cachedReach) {
+        reachable = new Set(cachedReach.reachable);
+        orderedTimes = cachedReach.ordered;
+      } else {
+        reachable = this.knownTimes(headTimes);
+        orderedTimes = Array.from(reachable).sort((a, b) => a - b);
+        this.reachabilityCache.set(headTimes[0], {
+          reachable: new Set(reachable),
+          ordered: orderedTimes,
+        });
+      }
+    } else {
+      reachable = this.knownTimes(headTimes);
+    }
     for (const w of without) {
       reachable.delete(w);
     }
@@ -205,7 +262,7 @@ export class PatchGraph {
       doc = this.codec.fromString("");
     }
 
-    const ordered = Array.from(reachable.values())
+    const ordered = (orderedTimes ?? Array.from(reachable.values()))
       .filter((t) => t > floor)
       .map((t) => this.patches.get(t)!)
       .sort(patchCmp);
@@ -213,9 +270,33 @@ export class PatchGraph {
     // dedup file-load patches that are identical and close in time
     this.dedupFileLoads(ordered);
 
-    for (const patch of ordered) {
+    // If allowed, seed from the most recent cached value whose applied-count matches.
+    let startIndex = 0;
+    if (useCache) {
+      for (let i = ordered.length - 1; i >= 0; i--) {
+        const cached = this.valueCache.get(ordered[i].time);
+        if (cached && cached.count === i + 1) {
+          doc = cached.doc;
+          startIndex = i + 1;
+          break;
+        }
+      }
+    }
+
+    for (let i = startIndex; i < ordered.length; i++) {
+      const patch = ordered[i];
       if (!patch.patch) continue;
       doc = this.codec.applyPatch(doc, patch.patch);
+      if (useCache) {
+        this.valueCache.set(patch.time, { doc, count: i + 1 });
+      }
+    }
+    if (allowMergeCache && headTimes.length > 1 && without.size === 0) {
+      const key = headTimes
+        .slice()
+        .sort((a, b) => a - b)
+        .join(",");
+      this.mergeCache.set(key, doc);
     }
     return doc;
   }
