@@ -1,6 +1,6 @@
 {
   "name": "patchflow",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": false,
   "description": "Lightweight patch-based directed acyclic graph realtime sync core",
   "license": "MIT",
@@ -23,6 +23,14 @@
       "types": "./dist/types/index.d.ts"
     }
   },
+  "files": [
+    "dist/esm/**/*",
+    "dist/cjs/**/*",
+    "dist/types/**/*",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
   "scripts": {
     "prebuild": "rm -rf dist",
     "build": "pnpm build:types && pnpm build:esm && pnpm build:cjs",
