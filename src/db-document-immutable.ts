@@ -245,9 +245,14 @@ export class DbDocument implements Document {
           }
         }
         const cur = record.get(field);
-        const change = fromJS(value);
+        const change = ImMap.isMap(value)
+          ? (value as ImMap<string, unknown>)
+          : (fromJS(value) as unknown);
         if (ImMap.isMap(cur) && ImMap.isMap(change)) {
-          record = record.set(field, mergeSet(cur as ImMap<string, unknown>, change));
+          record = record.set(
+            field,
+            mergeSet(cur as ImMap<string, unknown>, change as ImMap<string, unknown>),
+          );
         } else {
           record = record.set(field, change);
         }
@@ -544,5 +549,7 @@ export function fromString(
       console.warn(`CORRUPT db-doc string: ${e} -- skipping '${line}'`);
     }
   }
-  return new DbDocument(primaryKeys, stringCols, List(obj.map((x) => ImMap(x))));
+  // Preserve immutable records; ensure nested objects are converted to Immutable structures.
+  const immutableRecords = List(obj.map((x) => fromJS(x) as ImMap<string, unknown>));
+  return new DbDocument(primaryKeys, stringCols, immutableRecords);
 }

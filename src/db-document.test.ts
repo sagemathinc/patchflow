@@ -46,7 +46,7 @@ const toPlain = (record: unknown): JsMap | undefined => {
   return record as JsMap;
 };
 
-describe.each(backends)("%s DbDocument", ({ codec }) => {
+describe.each(backends)("%s DbDocument", ({ name, codec }) => {
   const newDoc = (): TestDoc => codec().fromString("") as unknown as TestDoc;
 
   it("inserts records and queries by primary key", () => {
@@ -104,4 +104,24 @@ describe.each(backends)("%s DbDocument", ({ codec }) => {
     const meta = getField(updated.getOne({ id: 1 }), "meta");
     expect(toPlain(meta)).toEqual({ a: 1, c: 3 });
   });
+
+  if (name === "immutable") {
+    it("preserves immutable map fields passed into set", () => {
+      const empty = newDoc();
+      const meta = ImMap<string, unknown>();
+      const doc = empty.set({ id: 1, meta } as unknown as JsMap);
+      const record = doc.getOne({ id: 1 });
+      const value = getField(record, "meta");
+      expect(ImMap.isMap(value)).toBe(true);
+    });
+
+    it("fromString builds immutable records (nested maps stay ImMap)", () => {
+      const codecInstance = codec();
+      const serialized = '{"id":1,"meta":{"a":1}}\n';
+      const doc = codecInstance.fromString(serialized) as unknown as TestDoc;
+      const record = doc.getOne({ id: 1 });
+      const meta = getField(record, "meta");
+      expect(ImMap.isMap(meta)).toBe(true);
+    });
+  }
 });
