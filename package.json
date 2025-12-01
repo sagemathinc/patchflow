@@ -1,8 +1,8 @@
 {
   "name": "patchflow",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": false,
-  "description": "Lightweight patch-DAG realtime sync core",
+  "description": "Lightweight patch-based directed acyclic graph realtime sync core",
   "license": "MIT",
   "type": "module",
   "repository": {
