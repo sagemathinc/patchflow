@@ -1,62 +1,69 @@
 # PatchFlow
 
-PatchFlow is a lightweight patch-DAG sync core. It manages concurrent edits to a document by recording patches with ancestry, merging heads deterministically, and keeping an optional on-disk or transport adapter out of core. The goal is a small, well-tested engine that prioritizes correctness and “small revision history” over heavyweight state replication.
-
-**STATUS:** _NOT YET READY FOR PRODUCTION_ \(Nov 2025\).
+PatchFlow is a lightweight patch-DAG sync core factored out of the production [CoCalc](https://cocalc.com) sync engine. It keeps a compact history of patches with ancestry, merges heads deterministically, and leaves transports/storage to adapters. The design favors correctness and small revision logs over heavyweight CRDT metadata.
 
 - https://www.npmjs.com/package/patchflow
 - https://github.com/sagemathinc/patchflow
 
-## What’s inside
+## Highlights
 
-- Core patch DAG: [src/patch-graph.ts](./src/patch-graph.ts) handles patch ancestry, head detection, three-way merges, snapshots, and file-load dedup.
-- Document types: strings via [src/string-document.ts](./src/string-document.ts); JSONL/“syncdb” docs via [src/db-document-immutable.ts](./src/db-document-immutable.ts) (immutable.js) and [src/db-document-immer.ts](./src/db-document-immer.ts) (immer).
-- Browse full edit history of documents
-- Manage cursors of users editing documents
-- Session orchestrator: [src/session.ts](./src/session.ts) wraps a PatchGraph + codec + adapters, exposing commit/applyRemote/undo/redo and file/presence hooks.
-- Adapters: in-memory patch store, file adapter, presence adapter, plus an interactive TCP/file demo in [examples/tcp-session.ts](./examples/tcp-session.ts).
-- Tests: Jest coverage for patch graph, session, string docs, db docs (both backends), file queueing, and presence.
+- Patch DAG: [src/patch-graph.ts](./src/patch-graph.ts) tracks ancestry, heads, newest common ancestors, and deterministic merges.
+- Session orchestration: [src/session.ts](./src/session.ts) wraps a PatchGraph plus codecs/adapters; exposes commit, applyRemote, undo/redo pointers, history summaries, working copies, snapshots, and cursors.
+- Document types:
+  - Strings: [src/string-document.ts](./src/string-document.ts) with diff-match-patch.
+  - SyncDB/JSONL tables: [src/db-document-immutable.ts](./src/db-document-immutable.ts) (immutable.js) and [src/db-document-immer.ts](./src/db-document-immer.ts) (immer) with indexed queries and string columns that use diff-match-patch for compact history.
+- Adapters: in-memory patch store, file store, presence adapter; easy to plug your own transport.
+- Examples: interactive TCP/file demo in [examples/tcp-session.ts](./examples/tcp-session.ts) and a syncdb demo in [examples/db-immer-session.ts](./examples/db-immer-session.ts).
+- Tests: Jest coverage for patch graph, session, string docs, db docs (both backends), file queueing, presence, cursors, and working copies.
 
-## How it differs from CRDTs like Yjs/Automerge
+## How PatchFlow differs from CRDTs (Yjs/Automerge)
 
-- Simpler model: PatchFlow stores a directed acyclic graph (DAG) of patches and replays/merges with three-way merge for divergent heads. It doesn’t maintain per-character CRDT metadata; patches are diffs (diff-match-patch for strings; structured patches for db-doc).
-  - NOTE: there are numerous buggy forks of diff-match-patch circulating, and PatchFlow uses [our own fork](https://www.npmjs.com/package/@cocalc/diff-match-patch), which fixes all known bugs, including the timeout not working and issues with unicode pairs.
-- Small history focus: PatchFlow is built to mirror “revision control” with a compact patch log and explicit snapshots, rather than a grow-only CRDT state that needs periodic GC.
-- Transport/storage agnostic: Core doesn’t bake in a wire format or network layer; you provide a PatchStore and optional File/Presence adapters.
-- Merge semantics: For string columns, PatchFlow uses diff-match-patch to create/apply patches; map fields use shallow merge with delete markers. CRDTs often aim for highly concurrent character-level edits with strong causality metadata; PatchFlow favors deterministic replay with simple merges and a small log.
-- Performance/ergonomics trade-off: Yjs/Automerge are tuned for very fast real-time collaboration with rich sharing semantics. PatchFlow is much smaller in scope and code size, easier to reason about, and aims for correctness with modest datasets (hundreds–thousands of records, typical file-sized docs) and explicit history.
+- Simpler model: store a DAG of patches and replay/merge via three-way merge on divergent heads; no per-character CRDT metadata.
+- Small history focus: compact patch logs and explicit snapshots; easy to time-travel any committed version.
+- Transport/storage agnostic: you supply a PatchStore and optional file/presence adapters.
+- String-friendly semantics: diff-match-patch for strings (using our fixed fork [@cocalc/diff-match-patch](https://www.npmjs.com/package/@cocalc/diff-match-patch)); shallow map merges with deletes for structured fields.
+- Great fit for modest datasets (hundreds–thousands of records, file-sized docs) where deterministic replay and small logs matter more than maximal concurrency throughput.
 
-When to prefer PatchFlow:
+Prefer PatchFlow when:
 
-- You want a minimal, testable core to embed in an app-specific transport.
-- You care about patch log size and replay determinism.
-- You need string diff/patch semantics and shallow object merges, not per-character CRDT metadata.
-- You’re fine with a patch-DAG merge model instead of a full CRDT lattice.
+- You want a minimal, testable sync core to embed in your own transport or storage.
+- You care about compact revision history and deterministic merges.
+- You need string diff/patch semantics or indexed JSONL-style tables.
 
-When to reach for Yjs/Automerge:
+Prefer Yjs/Automerge when:
 
-- You need large-scale, high-frequency character-level collaboration with built-in awareness, awareness messages, and rich CRDT types.
-- You want mature ecosystem integrations (rich text editors, awareness protocols) and are willing to manage CRDT GC/compaction separately.
+- You need large-scale, high-frequency character-level collaboration with rich CRDT types and awareness protocols.
+- You’re willing to manage CRDT GC/compaction and want existing editor integrations.
 
-## Quickstart (from npm)
+## Conceptual model (from CoCalc)
+
+Each edit is a patch with parents; the current state is the result of applying patches in ancestry order (best effort for structured fields). Divergent heads are merged via newest common ancestor + replay of descendant patches, yielding deterministic results with full history retained. This gives:
+
+- Immutable history for time-travel and auditing.
+- Undo/redo pointers over the DAG.
+- Ability to defer expensive work (e.g., merging) until users pause, without blocking live typing.
+
+## Quickstart
 
 ```sh
 npm install patchflow
 ```
 
-## Getting started
+Build/tests from source:
 
-- Install deps: `pnpm install`
-- Run tests: `pnpm test`
-- Lint/format: `pnpm lint`, `pnpm format`
-- Build: `pnpm build` (ESM + CJS)
-- Try the TCP demo (ts-node):
-  - Server: `node --loader ts-node/esm --experimental-specifier-resolution=node examples/tcp-session.ts --role=server --file=/tmp/patchflow-a.txt --port=8123`
-  - Client: same with `--role=client --file=/tmp/patchflow-b.txt --host=127.0.0.1 --port=8123`
-  - Use `set("text")`, `commit()`, `get()` in the REPL to stage/send changes.
+```sh
+pnpm install
+pnpm test
+pnpm lint
+pnpm build
+```
 
-## Status and roadmap
+## Try the demos
 
-- Core patch graph, session, string and db documents (immutable + immer) are implemented with tests.
-- Examples cover in-memory and TCP/file flows.
-- Future: adapters for other transports, more document types, optional SQLite-backed doc, and stronger history/snapshot tooling.
+- TCP/file session (TypeScript): `node --loader ts-node/esm --experimental-specifier-resolution=node examples/tcp-session.ts --role=server --file=/tmp/patchflow-a.txt --port=8123`
+- Client: same script with `--role=client --file=/tmp/patchflow-b.txt --host=127.0.0.1 --port=8123`
+- SyncDB demo: `pnpm example:db-immer:server` and `pnpm example:db-immer:client`
+
+## Status
+
+Actively used inside CoCalc; API is small and stable. Future work: additional adapters, optional SQLite-backed docs, and more convenience utilities around history and snapshots.
