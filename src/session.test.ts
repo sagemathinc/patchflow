@@ -71,6 +71,27 @@ describe("Session", () => {
     expect(session.getDocument().toString()).toBe("AB");
   });
 
+  it("retains undo state when exiting undo mode", async () => {
+    const store = new MemoryPatchStore();
+    const session = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
+    await session.init();
+
+    await session.commit(new StringDocument("A"));
+    await session.commit(new StringDocument("AB"));
+    expect(session.getDocument().toString()).toBe("AB");
+
+    session.undo(); // back to "A"
+    expect(session.getDocument().toString()).toBe("A");
+
+    await session.resetUndo(); // exit undo mode should keep "A" and clear redo stack
+    expect(session.getDocument().toString()).toBe("A");
+    // A new patch is created to preserve the undone state.
+    expect(session.versions().length).toBe(3);
+
+    session.redo(); // redo should be a no-op now
+    expect(session.getDocument().toString()).toBe("A");
+  });
+
   it("initializes from existing remote patches", async () => {
     const store = new MemoryPatchStore();
     const existing = new StringDocument("seed");

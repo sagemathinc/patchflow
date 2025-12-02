@@ -65,7 +65,7 @@ export interface PatchStore {
     patches: PatchEnvelope[];
     hasMore?: boolean;
   }>;
-  append(envelope: PatchEnvelope): Promise<void>;
+  append(envelope: PatchEnvelope): void;
   subscribe(onEnvelope: (env: PatchEnvelope) => void): () => void;
 }
 

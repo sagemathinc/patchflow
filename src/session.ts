@@ -231,10 +231,7 @@ export class Session extends EventEmitter {
   }
 
   // Apply local change as a patch, persist, and publish presence.
-  async commit(
-    nextDoc: Document,
-    opts: { file?: boolean; source?: string } = {},
-  ): Promise<PatchEnvelope> {
+  commit(nextDoc: Document, opts: { file?: boolean; source?: string } = {}): PatchEnvelope {
     if (!this.committedDoc) {
       throw new Error("session not initialized");
     }
@@ -260,7 +257,7 @@ export class Session extends EventEmitter {
     this.localTimes.push(time);
     this.undoPtr = this.localTimes.length;
     this.syncDoc();
-    await this.patchStore.append(envelope);
+    this.patchStore.append(envelope);
     // Optionally publish presence after commit
     this.presenceAdapter?.publish({ userId: this.userId, time });
     return envelope;
@@ -303,11 +300,32 @@ export class Session extends EventEmitter {
     };
   }
 
-  // Reset undo pointer to the top (exit undo mode).
+  // Reset undo pointer to the top (exit undo mode). If we are in an undone
+  // state, commit a new patch that preserves the current view so redo history
+  // is cleared without losing the undone changes.
   resetUndo(): void {
-    this.undoPtr = this.localTimes.length;
-    this.syncDoc();
-    this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
+    this.ensureInitialized();
+    const targetDoc = this.getDocument();
+    const fullDoc = this.graph.value(); // state with all local patches applied
+
+    if (!targetDoc.isEqual(fullDoc)) {
+      // Temporarily treat the full graph value as the base for the commit so
+      // we create a patch from fullDoc -> targetDoc.
+      const prevCommitted = this.committedDoc;
+      this.committedDoc = fullDoc;
+      try {
+        this.commit(targetDoc, { source: "undo-reset" });
+        // commit() already updated committedDoc/doc/undoPtr and published presence.
+      } catch (err) {
+        this.committedDoc = prevCommitted ?? this.committedDoc;
+        throw err;
+      }
+    } else {
+      // Nothing to preserve; just exit undo mode.
+      this.undoPtr = this.localTimes.length;
+      this.syncDoc();
+      this.presenceAdapter?.publish({ userId: this.userId, undoPtr: this.undoPtr });
+    }
   }
 
   // Record a staged working copy of the document. Does not append to history.
@@ -480,7 +498,7 @@ export class Session extends EventEmitter {
     this.localTimes = this.localTimes.slice(0, this.undoPtr);
     this.localTimes.push(time);
     this.undoPtr = this.localTimes.length;
-    await this.patchStore.append(envelope);
+    this.patchStore.append(envelope);
     this.syncDoc();
   }
 

@@ -14,7 +14,7 @@ export class MemoryPatchStore implements PatchStore {
     return { patches: this.patches.slice() };
   }
 
-  async append(envelope: PatchEnvelope): Promise<void> {
+  append(envelope: PatchEnvelope): void {
     this.patches.push(envelope);
     for (const fn of this.listeners) {
       fn(envelope);
