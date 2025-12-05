@@ -1,10 +1,19 @@
 import { List, Map } from "immutable";
 import { LRUCache } from "lru-cache";
-import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions } from "./types";
+import type {
+  DocCodec,
+  Document,
+  MergeStrategy,
+  Patch,
+  PatchGraphValueOptions,
+} from "./types";
 
 type PatchMap = Map<number, Patch>;
 
 const DEFAULT_DEDUP_TOLERANCE = 3000;
+
+// TOOD: make this easily configurable
+const VALUE_CACHE_SIZE = 32;
 
 function patchCmp(a: Patch, b: Patch): number {
   const av = a.version ?? 0;
@@ -24,7 +33,7 @@ export class PatchGraph {
   private mergeStrategy: MergeStrategy;
   // Cache single-head values keyed by patch time with a completeness count to avoid full replays.
   private valueCache = new LRUCache<number, { doc: Document; count: number }>({
-    max: 256,
+    max: VALUE_CACHE_SIZE,
   });
   // Cache reachability/topo for single heads.
   private reachabilityCache = new globalThis.Map<
@@ -138,11 +147,14 @@ export class PatchGraph {
     const limit = opts.limit ?? 1000;
     const start = this.getPatch(time); // throws if missing
     const chains: number[][] = [];
-    const stack: { node: Patch; path: number[] }[] = [{ node: start, path: [time] }];
+    const stack: { node: Patch; path: number[] }[] = [
+      { node: start, path: [time] },
+    ];
     while (stack.length > 0) {
       const { node, path } = stack.pop()!;
       const parents = node.parents ?? [];
-      const terminal = parents.length === 0 || (stopAtSnapshots && node.isSnapshot === true);
+      const terminal =
+        parents.length === 0 || (stopAtSnapshots && node.isSnapshot === true);
       if (terminal) {
         chains.push(path);
         if (chains.length > limit) {
@@ -302,10 +314,15 @@ export class PatchGraph {
   }
 
   private sortHeads(headTimes: number[]): number[] {
-    return [...headTimes].sort((a, b) => patchCmp(this.patches.get(a)!, this.patches.get(b)!));
+    return [...headTimes].sort((a, b) =>
+      patchCmp(this.patches.get(a)!, this.patches.get(b)!),
+    );
   }
 
-  private newestCommonAncestor(a: Set<number>, b: Set<number>): number | undefined {
+  private newestCommonAncestor(
+    a: Set<number>,
+    b: Set<number>,
+  ): number | undefined {
     let best: number | undefined;
     for (const t of a) {
       if (!b.has(t)) continue;
@@ -362,7 +379,9 @@ export class PatchGraph {
         last.patch &&
         patch.patch &&
         patch.time - last.time <= this.fileTimeDedupTolerance &&
-        List<unknown>(patch.patch as unknown[]).equals(List<unknown>(last.patch as unknown[]))
+        List<unknown>(patch.patch as unknown[]).equals(
+          List<unknown>(last.patch as unknown[]),
+        )
       ) {
         ordered.splice(i, 1);
         i -= 1;
@@ -372,7 +391,9 @@ export class PatchGraph {
     }
   }
 
-  history(opts: { start?: number; end?: number; includeSnapshots?: boolean } = {}): Patch[] {
+  history(
+    opts: { start?: number; end?: number; includeSnapshots?: boolean } = {},
+  ): Patch[] {
     const { start = -Infinity, end = Infinity, includeSnapshots = true } = opts;
     return this.patches
       .toArray()
