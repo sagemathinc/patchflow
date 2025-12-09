@@ -46,6 +46,7 @@ export class Session extends EventEmitter {
   private committedDoc?: Document; // graph-derived doc without staged edits
   private lastTime: number = 0;
   private userId: number;
+  private maxVersion: number = 0;
 
   private localTimes: number[] = [];
   private undoPtr = 0;
@@ -86,6 +87,7 @@ export class Session extends EventEmitter {
     this.hasMoreHistory = !!hasMore;
     this.graph.add(patches);
     this.lastTime = this.computeLastTime();
+    this.maxVersion = this.computeMaxVersion();
     this.committedDoc = this.graph.value();
     this.doc = this.committedDoc;
     if (this.fileAdapter && this.doc) {
@@ -238,17 +240,19 @@ export class Session extends EventEmitter {
     const base = this.workingCopy?.base ?? this.committedDoc;
     const patch = this.codec.makePatch(base, nextDoc);
     const time = this.nextTime();
+    const nextVersion = Math.max(this.maxVersion + 1, this.graph.versions().length + 1);
     const envelope: PatchEnvelope = {
       time,
       wall: this.clock(),
       patch,
       parents: this.graph.getHeads(),
       userId: this.userId,
-      version: this.graph.versions().length + 1,
+      version: nextVersion,
       file: opts.file,
       source: opts.source,
     };
     this.graph.add([envelope]);
+    this.maxVersion = Math.max(this.maxVersion, nextVersion);
     this.committedDoc = nextDoc;
     this.doc = nextDoc;
     this.workingCopy = undefined;
@@ -267,6 +271,11 @@ export class Session extends EventEmitter {
   applyRemote(env: PatchEnvelope): void {
     this.graph.add([env]);
     this.lastTime = Math.max(this.lastTime, env.time);
+    if (env.version != null) {
+      this.maxVersion = Math.max(this.maxVersion, env.version);
+    } else {
+      this.maxVersion = Math.max(this.maxVersion, this.graph.versions().length);
+    }
     this.syncDoc();
   }
 
@@ -462,6 +471,20 @@ export class Session extends EventEmitter {
     return this.lastTime;
   }
 
+  // Compute the maximum version seen in the current graph.
+  private computeMaxVersion(): number {
+    let max = 0;
+    this.graph.history().forEach((p) => {
+      if (p.version != null) {
+        max = Math.max(max, p.version);
+      }
+    });
+    if (max === 0) {
+      max = this.graph.versions().length;
+    }
+    return max;
+  }
+
   // React to filesystem changes by ingesting external content.
   private async handleFileChange(): Promise<void> {
     if (!this.doc || !this.fileAdapter) return;
@@ -485,15 +508,17 @@ export class Session extends EventEmitter {
     if (!this.doc) return;
     const patch = this.doc.makePatch(newDoc);
     const time = this.nextTime();
+    const nextVersion = Math.max(this.maxVersion + 1, this.graph.versions().length + 1);
     const envelope: PatchEnvelope = {
       time,
       wall: this.clock(),
       patch,
       parents: this.graph.getHeads(),
       userId: this.userId,
-      version: this.graph.versions().length + 1,
+      version: nextVersion,
     };
     this.graph.add([envelope]);
+    this.maxVersion = Math.max(this.maxVersion, nextVersion);
     this.doc = newDoc;
     this.localTimes = this.localTimes.slice(0, this.undoPtr);
     this.localTimes.push(time);

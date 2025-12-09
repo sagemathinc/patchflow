@@ -92,6 +92,27 @@ describe("Session", () => {
     expect(session.getDocument().toString()).toBe("A");
   });
 
+  it("keeps version numbers monotonic after reloading truncated history", async () => {
+    const base = new StringDocument("");
+    const seeded = new StringDocument("seed");
+    const seedPatch = base.makePatch(seeded);
+    // Simulate a truncated history where the only known patch has version 11.
+    const store = new MemoryPatchStore([
+      { time: 100, patch: seedPatch, parents: [], userId: 0, version: 11 },
+    ]);
+
+    const session = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
+    await session.init();
+    expect(session.versions()).toEqual([100]);
+    expect(session.getDocument().toString()).toBe("seed");
+
+    session.commit(new StringDocument("seed+1"));
+    const history = session.history();
+    expect(history.length).toBe(2);
+    const last = history[history.length - 1];
+    expect(last.version).toBe(12);
+  });
+
   it("initializes from existing remote patches", async () => {
     const store = new MemoryPatchStore();
     const existing = new StringDocument("seed");
