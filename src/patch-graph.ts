@@ -16,12 +16,14 @@ const DEFAULT_DEDUP_TOLERANCE = 3000;
 const VALUE_CACHE_SIZE = 32;
 
 function patchCmp(a: Patch, b: Patch): number {
+  if (a.time !== b.time) return a.time - b.time;
+
   const av = a.version ?? 0;
   const bv = b.version ?? 0;
+  if (av !== bv) return av - bv;
+
   const au = a.userId ?? 0;
   const bu = b.userId ?? 0;
-  if (a.time !== b.time) return a.time - b.time;
-  if (av !== bv) return av - bv;
   return au - bu;
 }
 
