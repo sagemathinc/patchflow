@@ -145,6 +145,12 @@ export class Session extends EventEmitter {
     return this.graph.versions(opts);
   }
 
+  // Return the current head logical times.
+  getHeads(): number[] {
+    this.ensureInitialized();
+    return this.graph.getHeads();
+  }
+
   // Compute the document at a specific version or with exclusions.
   value(opts: PatchGraphValueOptions = {}): Document {
     this.ensureInitialized();

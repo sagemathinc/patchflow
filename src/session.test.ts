@@ -28,6 +28,31 @@ describe("Session", () => {
     expect(sessionA.getDocument().toString()).toBe("hello world");
   });
 
+  it("exposes current heads, including multiple branches", async () => {
+    const base = new StringDocument("");
+    const seed = new StringDocument("seed");
+    const seedPatch = base.makePatch(seed);
+    const store = new MemoryPatchStore([{ time: 1, patch: seedPatch, parents: [], userId: 0 }]);
+
+    const sessionA = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
+    const sessionB = new Session({ codec: StringCodec, patchStore: store, userId: 2 });
+    await sessionA.init();
+    await sessionB.init();
+
+    expect(sessionA.getHeads()).toEqual([1]);
+    expect(sessionB.getHeads()).toEqual([1]);
+
+    // Append two concurrent branches off the seed.
+    const patchA = seed.makePatch(new StringDocument("A"));
+    const patchB = seed.makePatch(new StringDocument("B"));
+    store.append({ time: 2, patch: patchA, parents: [1], userId: 1 });
+    store.append({ time: 3, patch: patchB, parents: [1], userId: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sessionA.getHeads()).toEqual([2, 3]);
+    expect(sessionB.getHeads()).toEqual([2, 3]);
+  });
+
   it("rebases a staged working copy across remote patches", async () => {
     const store = new MemoryPatchStore();
     const sessionA = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
