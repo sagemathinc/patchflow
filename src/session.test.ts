@@ -6,6 +6,66 @@ import { MemoryPresenceAdapter } from "./adapters/memory-presence-adapter";
 import type { CursorSnapshot } from "./types";
 
 describe("Session", () => {
+  it("rejects userId outside the supported bucket (0-1023)", () => {
+    expect(
+      () =>
+        new Session({
+          codec: StringCodec,
+          patchStore: new MemoryPatchStore(),
+          userId: 2048,
+        }),
+    ).toThrow(/userId must be in \[0, 1023\]/);
+  });
+
+  it("aligns logical times to the user slot modulo 1024", async () => {
+    const bucket = (Session as any).TIME_SLOT_BUCKET ?? 1024;
+    const storeA = new MemoryPatchStore();
+    const storeB = new MemoryPatchStore();
+    const clock = () => 1000;
+
+    const sessionA = new Session({
+      codec: StringCodec,
+      patchStore: storeA,
+      userId: 1,
+      clock,
+    });
+    const sessionB = new Session({
+      codec: StringCodec,
+      patchStore: storeB,
+      userId: 2,
+      clock,
+    });
+    await sessionA.init();
+    await sessionB.init();
+
+    const envA = await sessionA.commit(new StringDocument("A"));
+    const envB = await sessionB.commit(new StringDocument("B"));
+
+    expect(envA.time % bucket).toBe(1);
+    expect(envB.time % bucket).toBe(2);
+    expect(envA.time).not.toBe(envB.time);
+  });
+
+  it("same user gets unique aligned times even within one clock tick", async () => {
+    const bucket = (Session as any).TIME_SLOT_BUCKET ?? 1024;
+    const clock = () => 1000;
+    const store = new MemoryPatchStore();
+    const session = new Session({
+      codec: StringCodec,
+      patchStore: store,
+      userId: 7,
+      clock,
+    });
+    await session.init();
+
+    const env1 = await session.commit(new StringDocument("A"));
+    const env2 = await session.commit(new StringDocument("B"));
+
+    expect(env1.time % bucket).toBe(7);
+    expect(env2.time % bucket).toBe(7);
+    expect(env2.time).toBeGreaterThan(env1.time);
+  });
+
   it("commits and merges remote patches", async () => {
     const store = new MemoryPatchStore();
     const sessionA = new Session({ codec: StringCodec, patchStore: store, userId: 1 });

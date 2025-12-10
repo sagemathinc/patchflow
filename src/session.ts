@@ -47,6 +47,9 @@ export class Session extends EventEmitter {
   private lastTime: number = 0;
   private userId: number;
   private maxVersion: number = 0;
+  // Per-user slot to avoid logical time collisions across clients sharing the same clock.
+  private readonly timeSlot: number;
+  private static readonly TIME_SLOT_BUCKET = 1024;
 
   private localTimes: number[] = [];
   private undoPtr = 0;
@@ -74,11 +77,20 @@ export class Session extends EventEmitter {
     this.codec = opts.codec;
     this.patchStore = opts.patchStore;
     this.clock = opts.clock ?? (() => Date.now());
-    this.userId = opts.userId ?? 0;
+    const uid = opts.userId ?? 0;
+    if (uid < 0 || uid >= Session.TIME_SLOT_BUCKET) {
+      throw new Error(
+        `userId must be in [0, ${Session.TIME_SLOT_BUCKET - 1}] to guarantee unique logical times`,
+      );
+    }
+    this.userId = uid;
     this.docId = opts.docId;
     this.fileAdapter = opts.fileAdapter;
     this.presenceAdapter = opts.presenceAdapter;
     this.graph = new PatchGraph({ codec: this.codec });
+    const bucket = Session.TIME_SLOT_BUCKET;
+    const slot = opts.userId ?? 0;
+    this.timeSlot = ((slot % bucket) + bucket) % bucket;
   }
 
   // Load initial history, seed state, and subscribe to adapters.
@@ -468,13 +480,17 @@ export class Session extends EventEmitter {
 
   // Produce the next monotonic logical time.
   private nextTime(): number {
-    const t = this.clock();
-    if (t > this.lastTime) {
-      this.lastTime = t;
+    const bucket = Session.TIME_SLOT_BUCKET;
+    const base = Math.max(this.clock(), this.lastTime + 1);
+    const remainder = base % bucket;
+    let aligned: number;
+    if (remainder <= this.timeSlot) {
+      aligned = base - remainder + this.timeSlot;
     } else {
-      this.lastTime += 1;
+      aligned = base - remainder + bucket + this.timeSlot;
     }
-    return this.lastTime;
+    this.lastTime = aligned;
+    return aligned;
   }
 
   // Compute the maximum version seen in the current graph.
