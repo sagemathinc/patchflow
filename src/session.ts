@@ -251,7 +251,10 @@ export class Session extends EventEmitter {
   }
 
   // Apply local change as a patch, persist, and publish presence.
-  commit(nextDoc: Document, opts: { file?: boolean; source?: string } = {}): PatchEnvelope {
+  commit(
+    nextDoc: Document,
+    opts: { file?: boolean; source?: string; meta?: PatchEnvelope["meta"] } = {},
+  ): PatchEnvelope {
     if (!this.committedDoc) {
       throw new Error("session not initialized");
     }
@@ -268,6 +271,7 @@ export class Session extends EventEmitter {
       version: nextVersion,
       file: opts.file,
       source: opts.source,
+      meta: opts.meta,
     };
     this.graph.add([envelope]);
     this.maxVersion = Math.max(this.maxVersion, nextVersion);
@@ -295,6 +299,7 @@ export class Session extends EventEmitter {
       this.maxVersion = Math.max(this.maxVersion, this.graph.versions().length);
     }
     this.syncDoc();
+    this.emit("patch", env);
   }
 
   // Step the undo pointer backward and recompute the doc.
@@ -538,6 +543,7 @@ export class Session extends EventEmitter {
       parents: this.graph.getHeads(),
       userId: this.userId,
       version: nextVersion,
+      file: true,
     };
     this.graph.add([envelope]);
     this.maxVersion = Math.max(this.maxVersion, nextVersion);

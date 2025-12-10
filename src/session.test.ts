@@ -3,7 +3,7 @@ import { StringCodec, StringDocument } from "./string-document";
 import { MemoryPatchStore } from "./adapters/memory-patch-store";
 import { MemoryFileAdapter } from "./adapters/memory-file-adapter";
 import { MemoryPresenceAdapter } from "./adapters/memory-presence-adapter";
-import type { CursorSnapshot } from "./types";
+import type { CursorSnapshot, PatchEnvelope } from "./types";
 
 describe("Session", () => {
   it("rejects userId outside the supported bucket (0-1023)", () => {
@@ -86,6 +86,28 @@ describe("Session", () => {
     await sessionB.commit(doc2);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sessionA.getDocument().toString()).toBe("hello world");
+  });
+
+  it("carries patch metadata through commit and remote apply", async () => {
+    const store = new MemoryPatchStore();
+    const sessionA = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
+    const sessionB = new Session({ codec: StringCodec, patchStore: store, userId: 2 });
+    await sessionA.init();
+    await sessionB.init();
+
+    const seen: PatchEnvelope[] = [];
+    sessionB.on("patch", (env) => seen.push(env));
+
+    const meta = { deleted: true, note: "disk", nested: { reason: "fs" }, list: [1, "x"] };
+    const env = await sessionA.commit(new StringDocument("hello"), { meta });
+    expect(env.meta).toEqual(meta);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[0].meta).toEqual(meta);
+
+    const last = sessionB.history().slice(-1)[0];
+    expect(last.meta).toEqual(meta);
   });
 
   it("exposes current heads, including multiple branches", async () => {

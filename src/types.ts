@@ -9,6 +9,15 @@ import type { CompressedPatch } from "./dmp";
 // - Patches are immutable once appended; transports may replay envelopes idempotently but must
 //   not mutate existing patches.
 // - Adapters provide a consistent ordering signal (time/wall/version) and do not reorder parents.
+// A JSON-compatible value for patch metadata.
+export type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JSONValue }
+  | JSONValue[];
+
 // A Patch represents a change with logical time and ancestry.
 export interface Patch {
   time: number;
@@ -22,6 +31,8 @@ export interface Patch {
   snapshot?: string;
   seqInfo?: { seq: number; prevSeq?: number };
   file?: boolean;
+  // Arbitrary JSON metadata (immutable once stored). Useful for tags like "deleted" or commit messages.
+  meta?: { [key: string]: JSONValue };
   // Optional transport provenance.
   source?: string;
 }
