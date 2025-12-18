@@ -4,21 +4,10 @@ import { MemoryPatchStore } from "./adapters/memory-patch-store";
 import { MemoryFileAdapter } from "./adapters/memory-file-adapter";
 import { MemoryPresenceAdapter } from "./adapters/memory-presence-adapter";
 import type { CursorSnapshot, PatchEnvelope } from "./types";
+import { decodePatchId, legacyPatchId } from "./patch-id";
 
 describe("Session", () => {
-  it("rejects userId outside the supported bucket (0-1023)", () => {
-    expect(
-      () =>
-        new Session({
-          codec: StringCodec,
-          patchStore: new MemoryPatchStore(),
-          userId: 2048,
-        }),
-    ).toThrow(/userId must be in \[0, 1023\]/);
-  });
-
-  it("aligns logical times to the user slot modulo 1024", async () => {
-    const bucket = (Session as any).TIME_SLOT_BUCKET ?? 1024;
+  it("uses unique patch ids across different clients on the same clock tick", async () => {
     const storeA = new MemoryPatchStore();
     const storeB = new MemoryPatchStore();
     const clock = () => 1000;
@@ -28,12 +17,14 @@ describe("Session", () => {
       patchStore: storeA,
       userId: 1,
       clock,
+      clientId: "A",
     });
     const sessionB = new Session({
       codec: StringCodec,
       patchStore: storeB,
       userId: 2,
       clock,
+      clientId: "B",
     });
     await sessionA.init();
     await sessionB.init();
@@ -41,13 +32,12 @@ describe("Session", () => {
     const envA = await sessionA.commit(new StringDocument("A"));
     const envB = await sessionB.commit(new StringDocument("B"));
 
-    expect(envA.time % bucket).toBe(1);
-    expect(envB.time % bucket).toBe(2);
     expect(envA.time).not.toBe(envB.time);
+    expect(decodePatchId(envA.time).timeMs).toBe(1000);
+    expect(decodePatchId(envB.time).timeMs).toBe(1000);
   });
 
-  it("same user gets unique aligned times even within one clock tick", async () => {
-    const bucket = (Session as any).TIME_SLOT_BUCKET ?? 1024;
+  it("same client gets unique patch ids even within one clock tick", async () => {
     const clock = () => 1000;
     const store = new MemoryPatchStore();
     const session = new Session({
@@ -55,15 +45,15 @@ describe("Session", () => {
       patchStore: store,
       userId: 7,
       clock,
+      clientId: "C",
     });
     await session.init();
 
     const env1 = await session.commit(new StringDocument("A"));
     const env2 = await session.commit(new StringDocument("B"));
 
-    expect(env1.time % bucket).toBe(7);
-    expect(env2.time % bucket).toBe(7);
-    expect(env2.time).toBeGreaterThan(env1.time);
+    expect(env1.time).not.toBe(env2.time);
+    expect(decodePatchId(env2.time).timeMs).toBeGreaterThan(decodePatchId(env1.time).timeMs);
   });
 
   it("commits and merges remote patches", async () => {
@@ -114,25 +104,28 @@ describe("Session", () => {
     const base = new StringDocument("");
     const seed = new StringDocument("seed");
     const seedPatch = base.makePatch(seed);
-    const store = new MemoryPatchStore([{ time: 1, patch: seedPatch, parents: [], userId: 0 }]);
+    const t1 = legacyPatchId(1);
+    const store = new MemoryPatchStore([{ time: t1, patch: seedPatch, parents: [], userId: 0 }]);
 
     const sessionA = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
     const sessionB = new Session({ codec: StringCodec, patchStore: store, userId: 2 });
     await sessionA.init();
     await sessionB.init();
 
-    expect(sessionA.getHeads()).toEqual([1]);
-    expect(sessionB.getHeads()).toEqual([1]);
+    expect(sessionA.getHeads()).toEqual([t1]);
+    expect(sessionB.getHeads()).toEqual([t1]);
 
     // Append two concurrent branches off the seed.
     const patchA = seed.makePatch(new StringDocument("A"));
     const patchB = seed.makePatch(new StringDocument("B"));
-    store.append({ time: 2, patch: patchA, parents: [1], userId: 1 });
-    store.append({ time: 3, patch: patchB, parents: [1], userId: 2 });
+    const t2 = legacyPatchId(2);
+    const t3 = legacyPatchId(3);
+    store.append({ time: t2, patch: patchA, parents: [t1], userId: 1 });
+    store.append({ time: t3, patch: patchB, parents: [t1], userId: 2 });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(sessionA.getHeads()).toEqual([2, 3]);
-    expect(sessionB.getHeads()).toEqual([2, 3]);
+    expect(sessionA.getHeads()).toEqual([t2, t3]);
+    expect(sessionB.getHeads()).toEqual([t2, t3]);
   });
 
   it("rebases a staged working copy across remote patches", async () => {
@@ -204,13 +197,14 @@ describe("Session", () => {
     const seeded = new StringDocument("seed");
     const seedPatch = base.makePatch(seeded);
     // Simulate a truncated history where the only known patch has version 11.
+    const tSeed = legacyPatchId(100);
     const store = new MemoryPatchStore([
-      { time: 100, patch: seedPatch, parents: [], userId: 0, version: 11 },
+      { time: tSeed, patch: seedPatch, parents: [], userId: 0, version: 11 },
     ]);
 
     const session = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
     await session.init();
-    expect(session.versions()).toEqual([100]);
+    expect(session.versions()).toEqual([tSeed]);
     expect(session.getDocument().toString()).toBe("seed");
 
     session.commit(new StringDocument("seed+1"));
@@ -226,7 +220,7 @@ describe("Session", () => {
     const base = new StringDocument("");
     const patch = base.makePatch(existing);
     // preload store
-    await store.append({ time: 1, patch, parents: [], userId: 0 });
+    await store.append({ time: legacyPatchId(1), patch, parents: [], userId: 0 });
     const session = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
     await session.init();
     expect(session.getDocument().toString()).toBe("seed");

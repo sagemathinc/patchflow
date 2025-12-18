@@ -2,9 +2,28 @@
 
 ## Fundamentally fix Collisions Problem
 
-Patchflow currently assumes that `Patch.time` is globally unique within a document’s patch graph. In practice this is false when the *same* `userId` can commit concurrently from multiple clients/processes (e.g. browser + backend service in CoCalc-lite, or multiple browser tabs). When two patches share the same logical `time`, one can overwrite the other in stores that key patches by time, causing silent data loss/corruption.
+Patchflow currently assumes that `Patch.time` is globally unique within a document’s patch graph. In practice this is false when the _same_ `userId` can commit concurrently from multiple clients/processes (e.g. browser + backend service in CoCalc-lite, or multiple browser tabs). When two patches share the same logical `time`, one can overwrite the other in stores that key patches by time, causing silent data loss/corruption.
 
 The fix is to make patch identity be a **pair** `(time, clientId)` rather than the scalar `time`. The `clientId` is an opaque, per-client random identifier (configurable generator; default crypto-random). Ordering becomes lexicographic by `(time, clientId)`, and collisions become vanishingly unlikely (only possible if two clients pick the same random `clientId`).
+
+### PatchId encoding recommendation
+
+To keep patch ids opaque but still debuggable, represent the `(time, clientId)` pair as a single string:
+
+- `PatchId = "<time36>_<client>"`
+- `time36`: logical time in milliseconds since epoch, encoded in base36 and **left-padded** to a fixed width so lexicographic ordering matches numeric ordering.
+- `client`: base64url (or base32/base36) encoding of a crypto-random byte string (96–128 bits typical).
+
+Example:
+
+```
+0kqv9gq3a_2VbCq9qWZ7yqfQ
+```
+
+Notes:
+
+- Use monotone logical time per client: `t = max(lastT + 1, Date.now())` to avoid backwards clock jumps.
+- Provide small `encodePatchId/decodePatchId` helpers for debugging and tests. Most of patchflow should treat `PatchId` as opaque and only compare by string order.
 
 ### Plan: switch patch identity from `time` to `(time, clientId)`
 
@@ -126,4 +145,3 @@ type SessionDeps = {
 4. \(done\) Add file adapter \+ tests: overlapping saves, init/close races, remote patches arriving during disk write.
 5. \(done\) Add presence adapter \(optional\) and keep it out of the core unless supplied.
 6. Integrate back into CoCalc via adapters \(conat\-backed PatchStore, FS/watch wrapper\), without reintroducing CoCalc\-specific code into the core.
-

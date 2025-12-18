@@ -2,6 +2,7 @@ import { PatchGraph } from "./patch-graph";
 import { StringCodec, StringDocument } from "./string-document";
 import { threeWayMerge } from "./dmp";
 import type { DocCodec, Document } from "./types";
+import { legacyPatchId } from "./patch-id";
 
 describe("PatchGraph with StringDocument", () => {
   const codec = StringCodec;
@@ -15,14 +16,16 @@ describe("PatchGraph with StringDocument", () => {
     const p1 = base.makePatch(v1);
     const p2 = v1.makePatch(v2);
 
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
     graph.add([
-      { time: 1, patch: p1, parents: [], userId: 0 },
-      { time: 2, patch: p2, parents: [1], userId: 0 },
+      { time: t1, patch: p1, parents: [], userId: 0 },
+      { time: t2, patch: p2, parents: [t1], userId: 0 },
     ]);
 
     const doc = graph.value();
     expect(doc.toString()).toBe("hello world");
-    expect(graph.getHeads()).toEqual([2]);
+    expect(graph.getHeads()).toEqual([t2]);
   });
 
   it("respects withoutTimes when computing value", () => {
@@ -34,21 +37,25 @@ describe("PatchGraph with StringDocument", () => {
     const p1 = base.makePatch(v1);
     const p2 = v1.makePatch(v2);
 
+    const t10 = legacyPatchId(10);
+    const t20 = legacyPatchId(20);
     graph.add([
-      { time: 10, patch: p1, parents: [], userId: 1 },
-      { time: 20, patch: p2, parents: [10], userId: 1 },
+      { time: t10, patch: p1, parents: [], userId: 1 },
+      { time: t20, patch: p2, parents: [t10], userId: 1 },
     ]);
 
-    const doc = graph.value({ withoutTimes: [20] });
+    const doc = graph.value({ withoutTimes: [t20] });
     expect(doc.toString()).toBe("A");
   });
 
   it("uses snapshots when present", () => {
     const graph = new PatchGraph({ codec });
     const snapDoc = new StringDocument("snap");
+    const t5 = legacyPatchId(5);
+    const t6 = legacyPatchId(6);
     graph.add([
-      { time: 5, isSnapshot: true, snapshot: snapDoc.toString(), parents: [] },
-      { time: 6, patch: snapDoc.makePatch(new StringDocument("snappy")), parents: [5] },
+      { time: t5, isSnapshot: true, snapshot: snapDoc.toString(), parents: [] },
+      { time: t6, patch: snapDoc.makePatch(new StringDocument("snappy")), parents: [t5] },
     ]);
     expect(graph.value().toString()).toBe("snappy");
   });
@@ -58,12 +65,14 @@ describe("PatchGraph with StringDocument", () => {
     const base = new StringDocument("");
     const doc1 = new StringDocument("X");
     const filePatch = base.makePatch(doc1);
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
     graph.add([
-      { time: 1, patch: filePatch, parents: [], file: true },
-      { time: 2, patch: filePatch, parents: [], file: true },
+      { time: t1, patch: filePatch, parents: [], file: true },
+      { time: t2, patch: filePatch, parents: [], file: true },
     ]);
-    expect(graph.version(1).toString()).toBe("X");
-    expect(graph.version(2).toString()).toBe("X");
+    expect(graph.version(t1).toString()).toBe("X");
+    expect(graph.version(t2).toString()).toBe("X");
   });
 
   it("handles divergent branches and merges them", () => {
@@ -87,22 +96,25 @@ describe("PatchGraph with StringDocument", () => {
     // materialize that merged text as a snapshot node. We still keep the
     // original branch tips so timetravel can show exactly what each user
     // committed before the merge.
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
+    const t3 = legacyPatchId(3);
     graph.add([
-      { time: 1, patch: pA, parents: [], userId: 0 },
-      { time: 2, patch: pB, parents: [], userId: 1 },
+      { time: t1, patch: pA, parents: [], userId: 0 },
+      { time: t2, patch: pB, parents: [], userId: 1 },
       {
-        time: 3,
-        parents: [1, 2],
+        time: t3,
+        parents: [t1, t2],
         userId: 0,
         isSnapshot: true,
         snapshot: docMerged.toString(),
       },
     ]);
 
-    expect(graph.getHeads()).toEqual([3]);
+    expect(graph.getHeads()).toEqual([t3]);
     expect(graph.value().toString()).toBe(mergedString);
-    expect(graph.version(1).toString()).toBe("A");
-    expect(graph.version(2).toString()).toBe("B");
+    expect(graph.version(t1).toString()).toBe("A");
+    expect(graph.version(t2).toString()).toBe("B");
   });
 
   it("defaults to 3-way merging of heads, with apply-all still available", () => {
@@ -111,9 +123,11 @@ describe("PatchGraph with StringDocument", () => {
     const docA = new StringDocument("A");
     const docB = new StringDocument("B");
 
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
     graph.add([
-      { time: 1, patch: base.makePatch(docA), parents: [], userId: 0 },
-      { time: 2, patch: base.makePatch(docB), parents: [], userId: 1 },
+      { time: t1, patch: base.makePatch(docA), parents: [], userId: 0 },
+      { time: t2, patch: base.makePatch(docB), parents: [], userId: 1 },
     ]);
 
     const defaultMerged = graph.value().toString();
@@ -137,25 +151,32 @@ describe("PatchGraph with StringDocument", () => {
     const docB = new StringDocument("B");
     const docAB = new StringDocument("AB");
 
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
+    const t3 = legacyPatchId(3);
+    const t4 = legacyPatchId(4);
     graph.add([
-      { time: 1, patch: base.makePatch(docA), parents: [], userId: 0 },
-      { time: 2, patch: base.makePatch(docB), parents: [], userId: 1 },
-      { time: 3, patch: docA.makePatch(docAB), parents: [1], userId: 0 },
-      { time: 4, isSnapshot: true, snapshot: docAB.toString(), parents: [3, 2] },
+      { time: t1, patch: base.makePatch(docA), parents: [], userId: 0 },
+      { time: t2, patch: base.makePatch(docB), parents: [], userId: 1 },
+      { time: t3, patch: docA.makePatch(docAB), parents: [t1], userId: 0 },
+      { time: t4, isSnapshot: true, snapshot: docAB.toString(), parents: [t3, t2] },
     ]);
 
-    expect(graph.getParents(3)).toEqual([1]);
-    expect(graph.getAncestors(3)).toEqual([1, 3]); // stops at snapshot by default
-    expect(graph.getAncestors(4, { stopAtSnapshots: false, includeSelf: true })).toEqual([
-      1, 2, 3, 4,
+    expect(graph.getParents(t3)).toEqual([t1]);
+    expect(graph.getAncestors(t3)).toEqual([t1, t3]); // stops at snapshot by default
+    expect(graph.getAncestors(t4, { stopAtSnapshots: false, includeSelf: true })).toEqual([
+      t1,
+      t2,
+      t3,
+      t4,
     ]);
 
-    expect(graph.getParentChains(4, { stopAtSnapshots: false })).toEqual([
-      [4, 3, 1],
-      [4, 2],
+    expect(graph.getParentChains(t4, { stopAtSnapshots: false })).toEqual([
+      [t4, t3, t1],
+      [t4, t2],
     ]);
 
-    expect(graph.versionsInRange({ start: 2, end: 3 })).toEqual([2, 3]);
+    expect(graph.versionsInRange({ start: t2, end: t3 })).toEqual([t2, t3]);
   });
 });
 
@@ -207,7 +228,8 @@ describe("PatchGraph caching", () => {
   it("reuses cached value for same head without exclusions", () => {
     const applyCount = { n: 0 };
     const graph = new PatchGraph({ codec: makeCodec(applyCount) });
-    graph.add([{ time: 1, parents: [], patch: "A" }]);
+    const t1 = legacyPatchId(1);
+    graph.add([{ time: t1, parents: [], patch: "A" }]);
 
     const first = graph.value();
     expect(first.toString()).toBe("A");
@@ -222,12 +244,14 @@ describe("PatchGraph caching", () => {
   it("busts cache when reachability changes (new patch)", () => {
     const applyCount = { n: 0 };
     const graph = new PatchGraph({ codec: makeCodec(applyCount) });
-    graph.add([{ time: 1, parents: [], patch: "A" }]);
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
+    graph.add([{ time: t1, parents: [], patch: "A" }]);
     graph.value();
     expect(applyCount.n).toBe(1);
 
     applyCount.n = 0;
-    graph.add([{ time: 2, parents: [1], patch: "B" }]);
+    graph.add([{ time: t2, parents: [t1], patch: "B" }]);
     const doc = graph.value();
     expect(doc.toString()).toBe("AB");
     // Reuses cached prefix (patch 1) and applies only the new patch.
@@ -237,14 +261,16 @@ describe("PatchGraph caching", () => {
   it("does not cache when exclusions are present", () => {
     const applyCount = { n: 0 };
     const graph = new PatchGraph({ codec: makeCodec(applyCount) });
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
     graph.add([
-      { time: 1, parents: [], patch: "A" },
-      { time: 2, parents: [1], patch: "B" },
+      { time: t1, parents: [], patch: "A" },
+      { time: t2, parents: [t1], patch: "B" },
     ]);
     graph.value(); // fill cache for head=2
     applyCount.n = 0;
 
-    const doc = graph.value({ withoutTimes: [2] });
+    const doc = graph.value({ withoutTimes: [t2] });
     expect(doc.toString()).toBe("A");
     // Only patch 1 applied; importantly, we recomputed instead of using cached head=2.
     expect(applyCount.n).toBe(1);
@@ -253,21 +279,25 @@ describe("PatchGraph caching", () => {
   it("reuses prefix when moving forward one version at a time", () => {
     const applyCount = { n: 0 };
     const graph = new PatchGraph({ codec: makeCodec(applyCount) });
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
+    const t3 = legacyPatchId(3);
+    const t4 = legacyPatchId(4);
     graph.add([
-      { time: 1, parents: [], patch: "A" },
-      { time: 2, parents: [1], patch: "B" },
-      { time: 3, parents: [2], patch: "C" },
+      { time: t1, parents: [], patch: "A" },
+      { time: t2, parents: [t1], patch: "B" },
+      { time: t3, parents: [t2], patch: "C" },
     ]);
 
     // First evaluation applies all three patches.
-    const v3 = graph.value({ time: 3 });
+    const v3 = graph.value({ time: t3 });
     expect(v3.toString()).toBe("ABC");
     expect(applyCount.n).toBe(3);
 
     // Moving to next version uses cached value at time 3 and only applies patch 4.
     applyCount.n = 0;
-    graph.add([{ time: 4, parents: [3], patch: "D" }]);
-    const v4 = graph.value({ time: 4 });
+    graph.add([{ time: t4, parents: [t3], patch: "D" }]);
+    const v4 = graph.value({ time: t4 });
     expect(v4.toString()).toBe("ABCD");
     expect(applyCount.n).toBe(1); // only the new patch was applied
   });

@@ -10,7 +10,11 @@ export class MemoryPatchStore implements PatchStore {
     }
   }
 
-  async loadInitial(): Promise<{ patches: PatchEnvelope[]; hasMore?: boolean }> {
+  async loadInitial(_opts?: {
+    since?: string;
+    sinceTime?: number;
+  }): Promise<{ patches: PatchEnvelope[]; hasMore?: boolean }> {
+    void _opts;
     return { patches: this.patches.slice() };
   }
 

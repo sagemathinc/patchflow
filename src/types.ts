@@ -1,4 +1,5 @@
 import type { CompressedPatch } from "./dmp";
+import type { PatchId } from "./patch-id";
 
 // Ingestion assumptions (handled by adapters/transports, kept out of core):
 // - Patch.time is unique within a graph (dedupe at the PatchStore boundary).
@@ -20,12 +21,12 @@ export type JSONValue =
 
 // A Patch represents a change with logical time and ancestry.
 export interface Patch {
-  time: number;
+  time: PatchId;
   wall?: number;
   patch?: unknown;
   userId?: number;
   size?: number;
-  parents?: number[];
+  parents?: PatchId[];
   version?: number;
   isSnapshot?: boolean;
   snapshot?: string;
@@ -61,8 +62,8 @@ export interface DocCodec {
 export type MergeStrategy = "apply-all" | "three-way";
 
 export type PatchGraphValueOptions = {
-  time?: number;
-  withoutTimes?: number[];
+  time?: PatchId;
+  withoutTimes?: PatchId[];
   mergeStrategy?: MergeStrategy;
 };
 
@@ -72,7 +73,7 @@ export interface PatchEnvelope extends Patch {
 }
 
 export interface PatchStore {
-  loadInitial(opts?: { sinceTime?: number }): Promise<{
+  loadInitial(opts?: { since?: PatchId; sinceTime?: number }): Promise<{
     patches: PatchEnvelope[];
     hasMore?: boolean;
   }>;

@@ -1,6 +1,7 @@
 import { EventEmitter } from "events";
 import { PatchGraph } from "./patch-graph";
 import { rebaseDraft } from "./working-copy";
+import { decodePatchId, encodePatchId } from "./patch-id";
 import type {
   DocCodec,
   Document,
@@ -22,6 +23,11 @@ export type SessionOptions = {
   clock?: () => number;
   // Optional local user id, propagated on emitted patches/presence.
   userId?: number;
+  // Optional per-client identifier for PatchId generation. Must be stable for the life
+  // of the Session instance. When omitted, a default is generated.
+  clientId?: string;
+  // Optional override for clientId generation (useful for tests).
+  clientIdFactory?: () => string;
   // Optional document identifier for presence scoping (e.g., path or id).
   docId?: string;
   // Optional file adapter to mirror the current doc to disk and watch for external edits.
@@ -29,6 +35,8 @@ export type SessionOptions = {
   // Optional presence adapter to publish/receive lightweight presence state.
   presenceAdapter?: PresenceAdapter;
 };
+
+let didWarnWeakClientIdEntropy = false;
 
 /**
  * Session orchestrates a local Document against a PatchGraph and a PatchStore.
@@ -44,14 +52,12 @@ export class Session extends EventEmitter {
   private readonly docId?: string;
   private doc?: Document; // live doc (committed + staged)
   private committedDoc?: Document; // graph-derived doc without staged edits
-  private lastTime: number = 0;
+  private lastTimeMs: number = 0;
   private userId: number;
   private maxVersion: number = 0;
-  // Per-user slot to avoid logical time collisions across clients sharing the same clock.
-  private readonly timeSlot: number;
-  private static readonly TIME_SLOT_BUCKET = 1024;
+  private readonly clientId: string;
 
-  private localTimes: number[] = [];
+  private localTimes: string[] = [];
   private undoPtr = 0;
   private unsubscribe?: () => void;
   private fileUnsubscribe?: () => void;
@@ -77,20 +83,57 @@ export class Session extends EventEmitter {
     this.codec = opts.codec;
     this.patchStore = opts.patchStore;
     this.clock = opts.clock ?? (() => Date.now());
-    const uid = opts.userId ?? 0;
-    if (uid < 0 || uid >= Session.TIME_SLOT_BUCKET) {
-      throw new Error(
-        `userId must be in [0, ${Session.TIME_SLOT_BUCKET - 1}] to guarantee unique logical times`,
-      );
-    }
-    this.userId = uid;
+    this.userId = opts.userId ?? 0;
     this.docId = opts.docId;
     this.fileAdapter = opts.fileAdapter;
     this.presenceAdapter = opts.presenceAdapter;
     this.graph = new PatchGraph({ codec: this.codec });
-    const bucket = Session.TIME_SLOT_BUCKET;
-    const slot = opts.userId ?? 0;
-    this.timeSlot = ((slot % bucket) + bucket) % bucket;
+    const factory =
+      opts.clientIdFactory ??
+      (() => {
+        // 96-bit random by default; encoded in base64url without padding.
+        // This is stable for the life of the Session and makes PatchIds effectively collision-free.
+        const bytes = new Uint8Array(12);
+        if (globalThis.crypto?.getRandomValues) {
+          globalThis.crypto.getRandomValues(bytes);
+        } else {
+          // Fallback for environments where WebCrypto is unavailable (e.g., non-secure http origins).
+          // This is weaker than CSPRNG. It is still fine for practical collision avoidance in dev,
+          // but should not be considered cryptographically strong.
+          if (!didWarnWeakClientIdEntropy) {
+            didWarnWeakClientIdEntropy = true;
+            // eslint-disable-next-line no-console
+            console.warn(
+              "patchflow: globalThis.crypto.getRandomValues unavailable; using weak randomness for Session clientId (dev/edge-case only)",
+            );
+          }
+          const seed =
+            Date.now() ^
+            (typeof performance !== "undefined" ? Math.floor(performance.now() * 1000) : 0);
+          for (let i = 0; i < bytes.length; i += 1) {
+            // Mix in a tiny bit of deterministic state to avoid repeating sequences across reloads.
+            bytes[i] = ((Math.random() * 256) ^ (seed >>> (i % 24))) & 0xff;
+          }
+        }
+
+        const toBase64Url = (data: Uint8Array): string => {
+          if (typeof Buffer !== "undefined") {
+            return Buffer.from(data)
+              .toString("base64")
+              .replace(/\+/g, "-")
+              .replace(/\//g, "_")
+              .replace(/=+$/g, "");
+          }
+          let bin = "";
+          for (const b of data) bin += String.fromCharCode(b);
+          // eslint-disable-next-line no-restricted-globals
+          const b64 = btoa(bin);
+          return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+        };
+
+        return toBase64Url(bytes);
+      });
+    this.clientId = opts.clientId ?? factory();
   }
 
   // Load initial history, seed state, and subscribe to adapters.
@@ -98,7 +141,7 @@ export class Session extends EventEmitter {
     const { patches, hasMore } = await this.patchStore.loadInitial();
     this.hasMoreHistory = !!hasMore;
     this.graph.add(patches);
-    this.lastTime = this.computeLastTime();
+    this.lastTimeMs = this.computeLastTimeMs();
     this.maxVersion = this.computeMaxVersion();
     this.committedDoc = this.graph.value();
     this.doc = this.committedDoc;
@@ -151,14 +194,14 @@ export class Session extends EventEmitter {
     this.hasMoreHistory = false;
   }
 
-  // Return logical times (versions) in ascending order.
-  versions(opts: { start?: number; end?: number } = {}): number[] {
+  // Return patch ids (versions) in ascending order.
+  versions(opts: { start?: string; end?: string } = {}): string[] {
     this.ensureInitialized();
     return this.graph.versions(opts);
   }
 
   // Return the current head logical times.
-  getHeads(): number[] {
+  getHeads(): string[] {
     this.ensureInitialized();
     return this.graph.getHeads();
   }
@@ -171,14 +214,14 @@ export class Session extends EventEmitter {
 
   // Return a sorted list of patches in the session, optionally filtered.
   history(
-    opts: { start?: number; end?: number; includeSnapshots?: boolean } = {},
+    opts: { start?: string; end?: string; includeSnapshots?: boolean } = {},
   ): PatchEnvelope[] {
     this.ensureInitialized();
     return this.graph.history(opts).map((p) => ({ ...p }));
   }
 
   // Fetch a specific patch by logical time.
-  getPatch(time: number): PatchEnvelope {
+  getPatch(time: string): PatchEnvelope {
     this.ensureInitialized();
     return { ...this.graph.getPatch(time) };
   }
@@ -212,8 +255,8 @@ export class Session extends EventEmitter {
 
     patches.forEach((p, idx) => {
       const wall = milliseconds
-        ? String(p.wall ?? p.time)
-        : new Date(p.wall ?? p.time).toISOString();
+        ? String(p.wall ?? decodePatchId(p.time).timeMs)
+        : new Date(p.wall ?? decodePatchId(p.time).timeMs).toISOString();
       const parents = p.parents && p.parents.length > 0 ? ` parents=[${p.parents.join(",")}]` : "";
       const patchStr = p.isSnapshot
         ? `(snapshot len=${p.snapshot?.length ?? 0})`
@@ -260,7 +303,8 @@ export class Session extends EventEmitter {
     }
     const base = this.workingCopy?.base ?? this.committedDoc;
     const patch = this.codec.makePatch(base, nextDoc);
-    const time = this.nextTime();
+    const timeMs = this.nextTimeMs();
+    const time = encodePatchId(timeMs, this.clientId);
     const nextVersion = Math.max(this.maxVersion + 1, this.graph.versions().length + 1);
     const envelope: PatchEnvelope = {
       time,
@@ -292,7 +336,7 @@ export class Session extends EventEmitter {
   // Merge a remote patch and refresh the current document.
   applyRemote(env: PatchEnvelope): void {
     this.graph.add([env]);
-    this.lastTime = Math.max(this.lastTime, env.time);
+    this.lastTimeMs = Math.max(this.lastTimeMs, decodePatchId(env.time).timeMs);
     if (env.version != null) {
       this.maxVersion = Math.max(this.maxVersion, env.version);
     } else {
@@ -325,7 +369,7 @@ export class Session extends EventEmitter {
   }
 
   // Return undo pointer and local history for callers that need to mirror undo UI.
-  undoState(): { undoPtr: number; localTimes: number[] } {
+  undoState(): { undoPtr: number; localTimes: string[] } {
     return {
       undoPtr: this.undoPtr,
       localTimes: [...this.localTimes],
@@ -427,7 +471,7 @@ export class Session extends EventEmitter {
   }
 
   // List local patch times that should be excluded (undo region).
-  private withoutTimes(): number[] {
+  private withoutTimes(): string[] {
     if (this.undoPtr >= this.localTimes.length) return [];
     return this.localTimes.slice(this.undoPtr);
   }
@@ -477,25 +521,21 @@ export class Session extends EventEmitter {
   }
 
   // Compute the latest logical time from the graph.
-  private computeLastTime(): number {
+  private computeLastTimeMs(): number {
     const versions = this.graph.versions();
     if (versions.length === 0) return 0;
-    return Math.max(...versions);
+    let best = 0;
+    for (const id of versions) {
+      best = Math.max(best, decodePatchId(id).timeMs);
+    }
+    return best;
   }
 
-  // Produce the next monotonic logical time.
-  private nextTime(): number {
-    const bucket = Session.TIME_SLOT_BUCKET;
-    const base = Math.max(this.clock(), this.lastTime + 1);
-    const remainder = base % bucket;
-    let aligned: number;
-    if (remainder <= this.timeSlot) {
-      aligned = base - remainder + this.timeSlot;
-    } else {
-      aligned = base - remainder + bucket + this.timeSlot;
-    }
-    this.lastTime = aligned;
-    return aligned;
+  // Produce the next monotonic logical time (milliseconds since epoch, but monotone per client).
+  private nextTimeMs(): number {
+    const base = Math.max(this.clock(), this.lastTimeMs + 1);
+    this.lastTimeMs = base;
+    return base;
   }
 
   // Compute the maximum version seen in the current graph.
@@ -534,7 +574,8 @@ export class Session extends EventEmitter {
   private async applyExternalDoc(newDoc: Document): Promise<void> {
     if (!this.doc) return;
     const patch = this.doc.makePatch(newDoc);
-    const time = this.nextTime();
+    const timeMs = this.nextTimeMs();
+    const time = encodePatchId(timeMs, this.clientId);
     const nextVersion = Math.max(this.maxVersion + 1, this.graph.versions().length + 1);
     const envelope: PatchEnvelope = {
       time,

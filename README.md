@@ -15,7 +15,7 @@ PatchFlow is a lightweight patch-DAG sync core factored out of the production [C
 - Adapters: in-memory patch store, file store, presence adapter; easy to plug your own transport.
 - Examples: interactive TCP/file demo in [examples/tcp-session.ts](./examples/tcp-session.ts) and a syncdb demo in [examples/db-immer-session.ts](./examples/db-immer-session.ts).
 - Tests: Jest coverage for patch graph, session, string docs, db docs (both backends), file queueing, presence, cursors, and working copies.
-- Deterministic **logical** times: each session participant must supply a unique `userId` in `[0,1023]`. PatchFlow guarantees no logical-time collisions across concurrent users in that range and will throw if you exceed the 1024-user window.  It is up to the client code how to coordinate allocating such a session userId.
+- Deterministic PatchIds: each patch has an opaque id `time` of the form `<time36>_<client>`, where `time36` is a monotone millisecond timestamp (base36, fixed width) and `client` is a per-session random id (base64url). This avoids logical-time collisions even when the same `userId` commits concurrently from multiple devices/tabs; you no longer need to allocate unique user slots in a fixed 1024-user window. For a hard guarantee, pass an explicit unique `clientId` when constructing each `Session`.
 
 ## How PatchFlow differs from CRDTs (Yjs/Automerge)
 

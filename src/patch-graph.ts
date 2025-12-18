@@ -1,14 +1,9 @@
 import { List, Map } from "immutable";
 import { LRUCache } from "lru-cache";
-import type {
-  DocCodec,
-  Document,
-  MergeStrategy,
-  Patch,
-  PatchGraphValueOptions,
-} from "./types";
+import { comparePatchId, decodePatchId } from "./patch-id";
+import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions } from "./types";
 
-type PatchMap = Map<number, Patch>;
+type PatchMap = Map<string, Patch>;
 
 const DEFAULT_DEDUP_TOLERANCE = 3000;
 
@@ -16,36 +11,28 @@ const DEFAULT_DEDUP_TOLERANCE = 3000;
 const VALUE_CACHE_SIZE = 32;
 
 function patchCmp(a: Patch, b: Patch): number {
-  if (a.time !== b.time) return a.time - b.time;
-
-  const av = a.version ?? 0;
-  const bv = b.version ?? 0;
-  if (av !== bv) return av - bv;
-
-  const au = a.userId ?? 0;
-  const bu = b.userId ?? 0;
-  return au - bu;
+  return comparePatchId(a.time, b.time);
 }
 
 export class PatchGraph {
-  private patches: PatchMap = Map<number, Patch>();
-  private children: Map<number, Set<number>> = Map<number, Set<number>>();
+  private patches: PatchMap = Map<string, Patch>();
+  private children: Map<string, Set<string>> = Map<string, Set<string>>();
   private codec: DocCodec;
   public fileTimeDedupTolerance = DEFAULT_DEDUP_TOLERANCE;
   private mergeStrategy: MergeStrategy;
   // Cache single-head values keyed by patch time with a completeness count to avoid full replays.
-  private valueCache = new LRUCache<number, { doc: Document; count: number }>({
+  private valueCache = new LRUCache<string, { doc: Document; count: number }>({
     max: VALUE_CACHE_SIZE,
   });
   // Cache reachability/topo for single heads.
   private reachabilityCache = new globalThis.Map<
-    number,
-    { reachable: Set<number>; ordered: number[] }
+    string,
+    { reachable: Set<string>; ordered: string[] }
   >();
   // Cache merged docs for multi-head evaluations with no exclusions.
   private mergeCache = new globalThis.Map<string, Document>();
   // Cache versions list.
-  private versionsCache?: number[];
+  private versionsCache?: string[];
 
   constructor(opts: { codec: DocCodec; mergeStrategy?: MergeStrategy }) {
     this.codec = opts.codec;
@@ -74,7 +61,7 @@ export class PatchGraph {
       };
       this.patches = this.patches.set(normalized.time, normalized);
       for (const parent of normalized.parents ?? []) {
-        const kids = this.children.get(parent) ?? new Set<number>();
+        const kids = this.children.get(parent) ?? new Set<string>();
         kids.add(normalized.time);
         this.children = this.children.set(parent, kids);
       }
@@ -85,9 +72,9 @@ export class PatchGraph {
     this.versionsCache = undefined;
   }
 
-  getHeads(): number[] {
+  getHeads(): string[] {
     const allTimes = new Set(this.patches.keySeq().toArray());
-    const parents = new Set<number>();
+    const parents = new Set<string>();
     this.patches.forEach((patch) => {
       for (const p of patch.parents ?? []) {
         parents.add(p);
@@ -96,12 +83,10 @@ export class PatchGraph {
     for (const p of parents) {
       allTimes.delete(p);
     }
-    return Array.from(allTimes.values()).sort((a, b) =>
-      patchCmp(this.patches.get(a)!, this.patches.get(b)!),
-    );
+    return Array.from(allTimes.values()).sort(comparePatchId);
   }
 
-  getPatch(time: number): Patch {
+  getPatch(time: string): Patch {
     const p = this.patches.get(time);
     if (!p) {
       throw new Error(`unknown time: ${time}`);
@@ -109,20 +94,20 @@ export class PatchGraph {
     return p;
   }
 
-  getParents(time: number): number[] {
+  getParents(time: string): string[] {
     return [...(this.getPatch(time).parents ?? [])];
   }
 
   getAncestors(
-    times: number | number[],
+    times: string | string[],
     opts: { includeSelf?: boolean; stopAtSnapshots?: boolean } = {},
-  ): number[] {
+  ): string[] {
     const includeSelf = opts.includeSelf ?? true;
     const stopAtSnapshots = opts.stopAtSnapshots ?? true;
     const seeds = Array.isArray(times) ? [...times] : [times];
     const seedSet = new Set(seeds);
     const stack = [...seeds];
-    const visited = new Set<number>();
+    const visited = new Set<string>();
     while (stack.length > 0) {
       const t = stack.pop()!;
       if (visited.has(t)) continue;
@@ -138,25 +123,22 @@ export class PatchGraph {
         stack.push(p);
       }
     }
-    return Array.from(visited.values()).sort((a, b) => a - b);
+    return Array.from(visited.values()).sort(comparePatchId);
   }
 
   getParentChains(
-    time: number,
+    time: string,
     opts: { stopAtSnapshots?: boolean; limit?: number } = {},
-  ): number[][] {
+  ): string[][] {
     const stopAtSnapshots = opts.stopAtSnapshots ?? true;
     const limit = opts.limit ?? 1000;
     const start = this.getPatch(time); // throws if missing
-    const chains: number[][] = [];
-    const stack: { node: Patch; path: number[] }[] = [
-      { node: start, path: [time] },
-    ];
+    const chains: string[][] = [];
+    const stack: { node: Patch; path: string[] }[] = [{ node: start, path: [time] }];
     while (stack.length > 0) {
       const { node, path } = stack.pop()!;
       const parents = node.parents ?? [];
-      const terminal =
-        parents.length === 0 || (stopAtSnapshots && node.isSnapshot === true);
+      const terminal = parents.length === 0 || (stopAtSnapshots && node.isSnapshot === true);
       if (terminal) {
         chains.push(path);
         if (chains.length > limit) {
@@ -180,23 +162,31 @@ export class PatchGraph {
     );
   }
 
-  versions(opts: { start?: number; end?: number } = {}): number[] {
-    const { start = -Infinity, end = Infinity } = opts;
+  versions(opts: { start?: string; end?: string } = {}): string[] {
+    const { start, end } = opts;
     if (this.versionsCache == null) {
       this.versionsCache = this.patches
         .toArray()
         .map(([, patch]) => patch.time)
-        .sort((a, b) => a - b);
+        .sort(comparePatchId);
     }
-    return this.versionsCache.filter((t) => t >= start && t <= end);
+    return this.versionsCache.filter((t) => {
+      if (start != null && comparePatchId(t, start) < 0) return false;
+      if (end != null && comparePatchId(t, end) > 0) return false;
+      return true;
+    });
   }
 
-  versionsInRange(opts: { start?: number; end?: number } = {}): number[] {
-    const { start = -Infinity, end = Infinity } = opts;
-    return this.versions().filter((t) => t >= start && t <= end);
+  versionsInRange(opts: { start?: string; end?: string } = {}): string[] {
+    const { start, end } = opts;
+    return this.versions().filter((t) => {
+      if (start != null && comparePatchId(t, start) < 0) return false;
+      if (end != null && comparePatchId(t, end) > 0) return false;
+      return true;
+    });
   }
 
-  version(time: number): Document {
+  version(time: string): Document {
     if (!this.patches.has(time)) {
       throw new Error(`unknown time: ${time}`);
     }
@@ -207,7 +197,7 @@ export class PatchGraph {
     if (opts.time != null && !this.patches.has(opts.time)) {
       throw new Error(`unknown time: ${opts.time}`);
     }
-    const without = new Set<number>(opts.withoutTimes ?? []);
+    const without = new Set<string>(opts.withoutTimes ?? []);
     const headTimes = opts.time != null ? [opts.time] : this.getHeads();
     if (headTimes.length === 0) {
       return this.codec.fromString("");
@@ -220,10 +210,7 @@ export class PatchGraph {
     }
 
     if (headTimes.length > 1 && without.size === 0) {
-      const key = headTimes
-        .slice()
-        .sort((a, b) => a - b)
-        .join(",");
+      const key = headTimes.slice().sort(comparePatchId).join(",");
       const cached = this.mergeCache.get(key);
       if (cached) {
         return cached;
@@ -237,13 +224,13 @@ export class PatchGraph {
   }
 
   private applyAllValue(
-    headTimes: number[],
-    without: Set<number>,
+    headTimes: string[],
+    without: Set<string>,
     useCache: boolean = false,
     allowMergeCache: boolean = false,
   ): Document {
-    let reachable: Set<number>;
-    let orderedTimes: number[] | undefined;
+    let reachable: Set<string>;
+    let orderedTimes: string[] | undefined;
     if (useCache && headTimes.length === 1 && without.size === 0) {
       const cachedReach = this.reachabilityCache.get(headTimes[0]);
       if (cachedReach) {
@@ -251,7 +238,7 @@ export class PatchGraph {
         orderedTimes = cachedReach.ordered;
       } else {
         reachable = this.knownTimes(headTimes);
-        orderedTimes = Array.from(reachable).sort((a, b) => a - b);
+        orderedTimes = Array.from(reachable).sort(comparePatchId);
         this.reachabilityCache.set(headTimes[0], {
           reachable: new Set(reachable),
           ordered: orderedTimes,
@@ -268,7 +255,7 @@ export class PatchGraph {
     }
     const snapshot = this.latestSnapshot(Array.from(reachable.values()));
     let doc: Document;
-    let floor = -Infinity;
+    let floor: string | undefined;
     if (snapshot) {
       floor = snapshot.time;
       doc = this.codec.fromString(snapshot.snapshot!);
@@ -277,7 +264,7 @@ export class PatchGraph {
     }
 
     const ordered = (orderedTimes ?? Array.from(reachable.values()))
-      .filter((t) => t > floor)
+      .filter((t) => (floor ? comparePatchId(t, floor) > 0 : true))
       .map((t) => this.patches.get(t)!)
       .sort(patchCmp);
 
@@ -306,37 +293,29 @@ export class PatchGraph {
       }
     }
     if (allowMergeCache && headTimes.length > 1 && without.size === 0) {
-      const key = headTimes
-        .slice()
-        .sort((a, b) => a - b)
-        .join(",");
+      const key = headTimes.slice().sort(comparePatchId).join(",");
       this.mergeCache.set(key, doc);
     }
     return doc;
   }
 
-  private sortHeads(headTimes: number[]): number[] {
-    return [...headTimes].sort((a, b) =>
-      patchCmp(this.patches.get(a)!, this.patches.get(b)!),
-    );
+  private sortHeads(headTimes: string[]): string[] {
+    return [...headTimes].sort(comparePatchId);
   }
 
-  private newestCommonAncestor(
-    a: Set<number>,
-    b: Set<number>,
-  ): number | undefined {
-    let best: number | undefined;
+  private newestCommonAncestor(a: Set<string>, b: Set<string>): string | undefined {
+    let best: string | undefined;
     for (const t of a) {
       if (!b.has(t)) continue;
-      if (best === undefined || t > best) {
+      if (best === undefined || comparePatchId(t, best) > 0) {
         best = t;
       }
     }
     return best;
   }
 
-  private knownTimes(heads: number[]): Set<number> {
-    const seen = new Set<number>();
+  private knownTimes(heads: string[]): Set<string> {
+    const seen = new Set<string>();
     const stack = [...heads];
     while (stack.length > 0) {
       const t = stack.pop()!;
@@ -353,12 +332,12 @@ export class PatchGraph {
     return seen;
   }
 
-  private latestSnapshot(times: number[]): Patch | undefined {
+  private latestSnapshot(times: string[]): Patch | undefined {
     let best: Patch | undefined;
     for (const t of times) {
       const p = this.patches.get(t);
       if (p?.isSnapshot && p.snapshot != null) {
-        if (!best || p.time > best.time) {
+        if (!best || comparePatchId(p.time, best.time) > 0) {
           best = p;
         }
       }
@@ -380,10 +359,9 @@ export class PatchGraph {
         last.file &&
         last.patch &&
         patch.patch &&
-        patch.time - last.time <= this.fileTimeDedupTolerance &&
-        List<unknown>(patch.patch as unknown[]).equals(
-          List<unknown>(last.patch as unknown[]),
-        )
+        decodePatchId(patch.time).timeMs - decodePatchId(last.time).timeMs <=
+          this.fileTimeDedupTolerance &&
+        List<unknown>(patch.patch as unknown[]).equals(List<unknown>(last.patch as unknown[]))
       ) {
         ordered.splice(i, 1);
         i -= 1;
@@ -393,14 +371,16 @@ export class PatchGraph {
     }
   }
 
-  history(
-    opts: { start?: number; end?: number; includeSnapshots?: boolean } = {},
-  ): Patch[] {
-    const { start = -Infinity, end = Infinity, includeSnapshots = true } = opts;
+  history(opts: { start?: string; end?: string; includeSnapshots?: boolean } = {}): Patch[] {
+    const { start, end, includeSnapshots = true } = opts;
     return this.patches
       .toArray()
       .map(([, patch]) => patch)
-      .filter((p) => p.time >= start && p.time <= end)
+      .filter((p) => {
+        if (start != null && comparePatchId(p.time, start) < 0) return false;
+        if (end != null && comparePatchId(p.time, end) > 0) return false;
+        return true;
+      })
       .filter((p) => includeSnapshots || !p.isSnapshot)
       .sort(patchCmp);
   }
