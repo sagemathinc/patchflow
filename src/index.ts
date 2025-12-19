@@ -21,3 +21,4 @@ export type {
   WhereCondition as WhereConditionImmer,
 } from "./db-document-immer";
 export * as dbDocumentImmer from "./db-document-immer";
+export * from "./client-id";
