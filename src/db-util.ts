@@ -1,5 +1,6 @@
 import { Map as ImMap } from "immutable";
-import { isDeepStrictEqual as deepEqual } from "util";
+import jsonstable from "fast-json-stable-stringify";
+import deepEqual from "fast-deep-equal/es6";
 export { deepEqual };
 
 export type JsMap = Record<string, unknown>;
@@ -8,7 +9,8 @@ export function toKey(value: unknown): string {
   if (ImMap.isMap(value)) {
     value = value.toJS();
   }
-  return JSON.stringify(value);
+  // must be stable, esepcially if value contains objects, which is technically allowed
+  return jsonstable(value);
 }
 
 export function toStr(objs: JsMap[]): string {

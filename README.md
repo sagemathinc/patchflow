@@ -37,11 +37,20 @@ Patchflow does not directly handle editors, persistence or communication.
 - Examples: interactive TCP/file demo in [examples/tcp-session.ts](./examples/tcp-session.ts) and a syncdb demo in [examples/db-immer-session.ts](./examples/db-immer-session.ts).
 - Tests: Jest coverage for patch graph, session, string docs, db docs (both backends), file queueing, presence, cursors, and working copies.
 - Deterministic PatchIds: each patch has an opaque id `time` of the form `<time36>_<client>`, where `time36` is a monotone millisecond timestamp (base36, fixed width) and `client` is a per-session random id (base64url). This avoids logical-time collisions even when the same `userId` commits concurrently from multiple devices/tabs; you no longer need to allocate unique user slots in a fixed 1024-user window. For a hard guarantee, pass an explicit unique `clientId` when constructing each `Session`.
+  
+## Why the DbDocument backends (immutable/immer)?
+
+The JSONL table documents are built on immutable.js and immer to make access to the full version history of structured documents efficient and robust:
+
+- Immutable and frozen immer document instances are safe to cache in PatchGraph and safe for working-copy rebases.
+- Structural sharing keeps snapshots and undo/redo cheap without copying whole tables.
+- String columns use diff-match-patch, so long text edits store compact deltas instead of full rewrites.
+- Deterministic JSONL serialization makes equality checks and snapshots stable.
 
 ## How Patchflow differs from CRDTs (Yjs/Automerge)
 
 - Simpler model: store a DAG of patches and replay/merge via three-way merge on divergent heads; no per-character CRDT metadata.
-- Small history focus: compact patch logs and explicit snapshots; easy to time-travel any committed version.
+- History focus: compact patch logs and explicit snapshots; easy to time-travel any committed version.
 - Transport/storage agnostic: you supply a PatchStore and optional file/presence adapters.
 - String-friendly semantics: diff-match-patch for strings (using our fixed fork [@cocalc/diff-match-patch](https://www.npmjs.com/package/@cocalc/diff-match-patch)); shallow map merges with deletes for structured fields.
 - Great fit for modest datasets (hundreds–thousands of records, file-sized docs) where deterministic replay and small logs matter more than maximal concurrency throughput.
