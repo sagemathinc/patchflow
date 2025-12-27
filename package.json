@@ -1,6 +1,6 @@
 {
   "name": "patchflow",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": false,
   "description": "Lightweight patch-based directed acyclic graph realtime sync core",
   "license": "MIT",
@@ -59,7 +59,8 @@
     "immer": "^10.2.0",
     "immutable": "^4.3.0",
     "lru-cache": "^11.0.1",
-    "save-dev": "0.0.1-security"
+    "save-dev": "0.0.1-security",
+    "util": "^0.12.5"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^28.0.0",

@@ -1,4 +1,6 @@
 import { Map as ImMap } from "immutable";
+import { isDeepStrictEqual as deepEqual } from "util";
+export { deepEqual };
 
 export type JsMap = Record<string, unknown>;
 
@@ -6,11 +8,11 @@ export function toKey(value: unknown): string {
   if (ImMap.isMap(value)) {
     value = value.toJS();
   }
-  return stableStringify(value);
+  return JSON.stringify(value);
 }
 
 export function toStr(objs: JsMap[]): string {
-  const lines = objs.map((x) => stableStringify(x));
+  const lines = objs.map((x) => JSON.stringify(x));
   lines.sort();
   return lines.join("\n");
 }
@@ -65,32 +67,4 @@ export function copyWithout<T extends JsMap>(obj: T, field: string): T {
 export function len(obj?: JsMap): number {
   if (!obj) return 0;
   return Object.keys(obj).length;
-}
-
-export function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  return stableStringify(a) === stableStringify(b);
-}
-
-function stableStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
-  const normalize = (v: unknown): unknown => {
-    if (v && typeof v === "object") {
-      const obj = v as Record<string, unknown>;
-      if (seen.has(obj)) {
-        return null;
-      }
-      seen.add(obj);
-      if (Array.isArray(obj)) {
-        return obj.map(normalize);
-      }
-      const out: Record<string, unknown> = {};
-      for (const key of Object.keys(obj).sort()) {
-        out[key] = normalize(obj[key]);
-      }
-      return out;
-    }
-    return v;
-  };
-  return JSON.stringify(normalize(value)) ?? "";
 }
