@@ -45,7 +45,7 @@ The JSONL table documents are built on immutable.js and immer to make access to 
 - Immutable and frozen immer document instances are safe to cache in PatchGraph and safe for working-copy rebases.
 - Structural sharing keeps snapshots and undo/redo cheap without copying whole tables.
 - String columns use diff-match-patch, so long text edits store compact deltas instead of full rewrites.
-- Deterministic JSONL serialization makes equality checks and snapshots stable.
+- JSONL/snapshot serialization is for portability; deterministic ordering is not guaranteed.
 
 ## How Patchflow differs from CRDTs (Yjs/Automerge)
 

@@ -9,7 +9,7 @@ export function toKey(value: unknown): string {
   if (ImMap.isMap(value)) {
     value = value.toJS();
   }
-  // must be stable, esepcially if value contains objects, which is technically allowed
+  // must be stable, especially if value contains objects, which is technically allowed
   return jsonstable(value);
 }
 
