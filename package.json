@@ -51,7 +51,8 @@
     "example:db-immer:server": "pnpm build && node dist/esm/examples/db-immer-session.js --role=server",
     "example:db-immer:client": "pnpm build && node dist/esm/examples/db-immer-session.js --role=client --host=127.0.0.1",
     "example:db-immer:server:ts": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/db-immer-session.ts --role=server",
-    "example:db-immer:client:ts": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/db-immer-session.ts --role=client --host=127.0.0.1"
+    "example:db-immer:client:ts": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/db-immer-session.ts --role=client --host=127.0.0.1",
+    "bench:immer": "node --loader ts-node/esm --experimental-specifier-resolution=node examples/bench-immer-apply.ts"
   },
   "dependencies": {
     "@cocalc/diff-match-patch": "^1.0.0",
