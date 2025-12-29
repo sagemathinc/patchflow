@@ -441,6 +441,13 @@ export const createImmerDbCodec = (opts: {
     fromString: (text: string) => fromString(text, pk, stringCols),
     toString: (doc: Document) => (doc as DbDocumentImmer).toString(),
     applyPatch: (doc: Document, patch: unknown) => (doc as DbDocumentImmer).applyPatch(patch),
+    applyPatchBatch: (doc: Document, patches: unknown[]) => {
+      let current = doc as DbDocumentImmer;
+      for (const patch of patches) {
+        current = current.applyPatch(patch);
+      }
+      return current;
+    },
     makePatch: (a: Document, b: Document) => (a as DbDocumentImmer).makePatch(b as DbDocumentImmer),
   };
 };

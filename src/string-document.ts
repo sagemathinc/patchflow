@@ -47,5 +47,12 @@ export const StringCodec = {
   fromString: (text: string) => new StringDocument(text),
   toString: (doc: StringDocument) => doc.toString(),
   applyPatch: (doc: StringDocument, patch: CompressedPatch) => doc.applyPatch(patch),
+  applyPatchBatch: (doc: StringDocument, patches: CompressedPatch[]) => {
+    let current = doc;
+    for (const patch of patches) {
+      current = current.applyPatch(patch);
+    }
+    return current;
+  },
   makePatch: (a: StringDocument, b: StringDocument) => a.makePatch(b),
 };

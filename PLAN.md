@@ -4,18 +4,17 @@
 
 Currently the implementation of src/db-document-immer.ts is not optimal.  Our goal is to make it much more efficient in terms of speed and memory.
 
-- [x] Build a synthetic benchmark that applies N patches (e.g. 1k) against a document with deletes/sets + string columns; run for `db-document-immer`, `db-document-immutable`, and `string` codecs so we can compare.
-- [ ] Extend the patchflow core to apply patches in batches instead of one-by-one when computing a value; expose a batch API from session/graph.
-- [ ] Add `applyPatchBatch` to all codecs (string/immutable/immer). Start with a trivial implementation that loops and calls `applyPatch`.
+- [x] Build a synthetic benchmark that applies N patches \(e.g. 1k\) against a document with deletes/sets \+ string columns; run for `db-document-immer`, `db-document-immutable`, and `string` codecs so we can compare.
+- [x] Extend the patchflow core to apply patches in batches instead of one\-by\-one when computing a value; expose a batch API from session/graph.
+- [x] Add `applyPatchBatch` to all codecs \(string/immutable/immer\). Start with a trivial implementation that loops and calls `applyPatch`.
 - [ ] Implement a fast `applyPatchBatch` for the immer codec:
   - apply all patch operations inside a single `produce` call
-  - track dirty keys and update indexes once at the end (no per-op rebuilds)
+  - track dirty keys and update indexes once at the end \(no per\-op rebuilds\)
   - avoid allocating a new DbDocumentImmer per op
-- [ ] Improve immutable + string implementations:
+- [ ] Improve immutable \+ string implementations:
   - keep incremental index updates for immutable
-  - fast-path no-ops for string (or precompute diff application where possible)
-- [ ] Re-run the benchmark and record before/after numbers in this section.
-
+  - fast\-path no\-ops for string \(or precompute diff application where possible\)
+- [ ] Re\-run the benchmark and record before/after numbers in this section.
 
 ## (done) Fundamentally fix Collisions Problem
 
@@ -162,3 +161,4 @@ type SessionDeps = {
 4. \(done\) Add file adapter \+ tests: overlapping saves, init/close races, remote patches arriving during disk write.
 5. \(done\) Add presence adapter \(optional\) and keep it out of the core unless supplied.
 6. Integrate back into CoCalc via adapters \(conat\-backed PatchStore, FS/watch wrapper\), without reintroducing CoCalc\-specific code into the core.
+

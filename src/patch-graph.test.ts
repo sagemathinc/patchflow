@@ -222,6 +222,14 @@ describe("PatchGraph caching", () => {
       applyCount.n += 1;
       return doc.applyPatch(patch);
     },
+    applyPatchBatch: (doc: Document, patches: unknown[]) => {
+      let current = doc;
+      for (const patch of patches) {
+        applyCount.n += 1;
+        current = current.applyPatch(patch);
+      }
+      return current;
+    },
     makePatch: (a: Document, b: Document) => a.makePatch(b),
   });
 

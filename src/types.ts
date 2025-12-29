@@ -56,6 +56,7 @@ export interface DocCodec {
   fromString(text: string): Document;
   toString(doc: Document): string;
   applyPatch(doc: Document, patch: unknown): Document;
+  applyPatchBatch(doc: Document, patches: unknown[]): Document;
   makePatch(a: Document, b: Document): unknown;
 }
 

@@ -284,12 +284,24 @@ export class PatchGraph {
       }
     }
 
-    for (let i = startIndex; i < ordered.length; i++) {
-      const patch = ordered[i];
-      if (!patch.patch) continue;
-      doc = this.codec.applyPatch(doc, patch.patch);
-      if (useCache) {
-        this.valueCache.set(patch.time, { doc, count: i + 1 });
+    if (!useCache) {
+      const patches: unknown[] = [];
+      for (let i = startIndex; i < ordered.length; i++) {
+        const patch = ordered[i];
+        if (!patch.patch) continue;
+        patches.push(patch.patch);
+      }
+      if (patches.length > 0) {
+        doc = this.codec.applyPatchBatch(doc, patches);
+      }
+    } else {
+      for (let i = startIndex; i < ordered.length; i++) {
+        const patch = ordered[i];
+        if (!patch.patch) continue;
+        doc = this.codec.applyPatch(doc, patch.patch);
+        if (useCache) {
+          this.valueCache.set(patch.time, { doc, count: i + 1 });
+        }
       }
     }
     if (allowMergeCache && headTimes.length > 1 && without.size === 0) {

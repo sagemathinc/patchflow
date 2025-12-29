@@ -525,6 +525,13 @@ export const createDbCodec = (opts: { primaryKeys: string[]; stringCols?: string
     fromString: (text: string) => fromString(text, pk, stringCols),
     toString: (doc: Document) => (doc as DbDocument).toString(),
     applyPatch: (doc: Document, patch: unknown) => (doc as DbDocument).applyPatch(patch),
+    applyPatchBatch: (doc: Document, patches: unknown[]) => {
+      let current = doc as DbDocument;
+      for (const patch of patches) {
+        current = current.applyPatch(patch);
+      }
+      return current;
+    },
     makePatch: (a: Document, b: Document) => (a as DbDocument).makePatch(b as DbDocument),
   };
 };
