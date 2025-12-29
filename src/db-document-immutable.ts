@@ -108,6 +108,14 @@ export class DbDocument implements Document {
     }, this);
   }
 
+  public applyPatchBatch(patches: unknown[]): DbDocument {
+    let current: DbDocument = this;
+    for (const patch of patches) {
+      current = current.applyPatch(patch);
+    }
+    return current;
+  }
+
   // Compute a patch from this document to another.
   public makePatch(other: DbDocument): DbPatch {
     if (other.size === 0) {

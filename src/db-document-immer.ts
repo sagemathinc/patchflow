@@ -90,18 +90,169 @@ export class DbDocumentImmer implements Document {
     if (!Array.isArray(patch)) {
       throw new Error("DbPatch must be an array");
     }
-    return patch.reduce<DbDocumentImmer>((acc, _, idx) => {
-      if (idx % 2 === 1) return acc;
-      const op = patch[idx];
-      const payload = patch[idx + 1] as JsMap[] | undefined;
-      if (op === -1) {
-        return acc.delete(payload as WhereCondition[]);
+    return this.applyPatchBatch([patch]);
+  }
+
+  // Apply a batch of patches in one pass, updating indexes incrementally.
+  public applyPatchBatch(patches: unknown[]): DbDocumentImmer {
+    if (patches.length === 0) return this;
+    const nextRecords: DbRecord[] = this.records.slice();
+    const nextIndexes = this.cloneIndexes(this.indexes);
+    let nextSize = this.size;
+
+    const removeFromIndexes = (record: JsMap, idx: number): void => {
+      for (const field of this.primaryKeys) {
+        const val = record[field];
+        if (val == null) continue;
+        const key = toKey(val);
+        const index = nextIndexes.get(field);
+        if (!index) continue;
+        const set = index.get(key);
+        if (!set) continue;
+        set.delete(idx);
+        if (set.size === 0) {
+          index.delete(key);
+        }
       }
-      if (op === 1) {
-        return acc.set(payload as SetCondition[]);
+    };
+
+    const addToIndexes = (record: JsMap, idx: number): void => {
+      for (const field of this.primaryKeys) {
+        const val = record[field];
+        if (val == null) continue;
+        const key = toKey(val);
+        let index = nextIndexes.get(field);
+        if (!index) {
+          index = new Map();
+          nextIndexes.set(field, index);
+        }
+        const set = index.get(key) ?? new Set<number>();
+        set.add(idx);
+        index.set(key, set);
       }
-      return acc;
-    }, this);
+    };
+
+    const selectWithIndexes = (where: WhereCondition): Set<number> => {
+      const n = len(where as JsMap);
+      let result: Set<number> | undefined;
+      for (const field in where) {
+        const value = where[field];
+        const index = nextIndexes.get(field);
+        if (!index) {
+          throw new Error(`field '${field}' must be a primary key`);
+        }
+        const matches = index.get(toKey(value));
+        if (!matches) return new Set();
+        if (n === 1) return new Set(matches);
+        result = result ? this.intersect(result, matches) : new Set(matches);
+      }
+      if (!result) {
+        result = new Set();
+        nextRecords.forEach((rec, idx) => {
+          if (rec) result!.add(idx);
+        });
+      }
+      return result;
+    };
+
+    const applyDelete = (payload?: JsMap[]): void => {
+      if (!payload || payload.length === 0) return;
+      for (const where of payload as WhereCondition[]) {
+        if (!isObject(where)) {
+          throw new Error("DbDocumentImmer.delete expects an object or array of objects");
+        }
+        const matches = selectWithIndexes(where as WhereCondition);
+        for (const idx of matches) {
+          const rec = nextRecords[idx];
+          if (!rec) continue;
+          removeFromIndexes(rec, idx);
+          nextRecords[idx] = undefined;
+          nextSize -= 1;
+        }
+      }
+    };
+
+    const applySetBatch = (payload?: JsMap[]): void => {
+      if (!payload || payload.length === 0) return;
+      for (const obj of payload as SetCondition[]) {
+        if (!isObject(obj)) {
+          throw new Error("DbDocumentImmer.set expects an object or array of objects");
+        }
+        const { where, set } = this.parse(obj as JsMap);
+        const matches = selectWithIndexes(where);
+        if (matches.size > 0) {
+          for (const idx of matches) {
+            const current = nextRecords[idx];
+            if (!current) continue;
+            const next = this.applySet(current, set);
+            if (next === current) continue;
+            if (this.primaryKeys.size > 0) {
+              for (const field of this.primaryKeys) {
+                const oldVal = current[field];
+                const newVal = next[field];
+                if (!deepEqual(oldVal, newVal)) {
+                  if (oldVal != null) {
+                    const index = nextIndexes.get(field);
+                    const set0 = index?.get(toKey(oldVal));
+                    if (set0) {
+                      set0.delete(idx);
+                      if (set0.size === 0) index?.delete(toKey(oldVal));
+                    }
+                  }
+                  if (newVal != null) {
+                    let index = nextIndexes.get(field);
+                    if (!index) {
+                      index = new Map();
+                      nextIndexes.set(field, index);
+                    }
+                    const set1 = index.get(toKey(newVal)) ?? new Set<number>();
+                    set1.add(idx);
+                    index.set(toKey(newVal), set1);
+                  }
+                }
+              }
+            }
+            nextRecords[idx] = next;
+          }
+          continue;
+        }
+        // Insert
+        const insertObj: JsMap = { ...obj };
+        for (const field of this.stringCols) {
+          if (insertObj[field] != null && isArray(insertObj[field])) {
+            delete insertObj[field];
+          }
+        }
+        this.stripNulls(insertObj);
+        const idx = nextRecords.length;
+        nextRecords.push(insertObj);
+        nextSize += 1;
+        addToIndexes(insertObj, idx);
+      }
+    };
+
+    for (const patch of patches) {
+      if (!Array.isArray(patch)) {
+        throw new Error("DbPatch must be an array");
+      }
+      for (let i = 0; i < patch.length; i += 2) {
+        const op = patch[i];
+        const payload = patch[i + 1] as JsMap[] | undefined;
+        if (op === -1) {
+          applyDelete(payload);
+        } else if (op === 1) {
+          applySetBatch(payload);
+        }
+      }
+    }
+
+    return new DbDocumentImmer(
+      this.primaryKeys,
+      this.stringCols,
+      nextRecords,
+      nextIndexes,
+      nextSize,
+    );
   }
 
   // Compute a patch from this document to another.
@@ -247,6 +398,19 @@ export class DbDocumentImmer implements Document {
   private withRecords(records: DbRecord[]): DbDocumentImmer {
     const { indexes, size } = this.rebuildIndexes(records);
     return new DbDocumentImmer(this.primaryKeys, this.stringCols, records, indexes, size);
+  }
+
+  // Deep-clone indexes so we can mutate them safely in batch operations.
+  private cloneIndexes(indexes: Indexes): Indexes {
+    const next: Indexes = new Map();
+    for (const [field, index] of indexes.entries()) {
+      const nextIndex: Index = new Map();
+      for (const [key, set] of index.entries()) {
+        nextIndex.set(key, new Set(set));
+      }
+      next.set(field, nextIndex);
+    }
+    return next;
   }
 
   // Build indexes and size from a record array.
@@ -442,11 +606,7 @@ export const createImmerDbCodec = (opts: {
     toString: (doc: Document) => (doc as DbDocumentImmer).toString(),
     applyPatch: (doc: Document, patch: unknown) => (doc as DbDocumentImmer).applyPatch(patch),
     applyPatchBatch: (doc: Document, patches: unknown[]) => {
-      let current = doc as DbDocumentImmer;
-      for (const patch of patches) {
-        current = current.applyPatch(patch);
-      }
-      return current;
+      return (doc as DbDocumentImmer).applyPatchBatch(patches);
     },
     makePatch: (a: Document, b: Document) => (a as DbDocumentImmer).makePatch(b as DbDocumentImmer),
   };

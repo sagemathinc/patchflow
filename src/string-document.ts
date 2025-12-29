@@ -19,6 +19,14 @@ export class StringDocument implements Document {
     return new StringDocument(applyPatch(patch, this.value)[0]);
   }
 
+  public applyPatchBatch(patches: CompressedPatch[]): StringDocument {
+    let current: StringDocument = this;
+    for (const patch of patches) {
+      current = current.applyPatch(patch);
+    }
+    return current;
+  }
+
   public makePatch(other: StringDocument): CompressedPatch {
     return makePatch(this.value, other.value);
   }

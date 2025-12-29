@@ -186,6 +186,13 @@ describe("PatchGraph caching", () => {
     applyPatch(patch: unknown): Document {
       return new FakeDoc(this.content + String(patch ?? ""));
     }
+    applyPatchBatch(patches: unknown[]): Document {
+      let current: Document = this;
+      for (const patch of patches) {
+        current = current.applyPatch(patch);
+      }
+      return current;
+    }
     makePatch(other: Document): unknown {
       return (other as FakeDoc).content.slice(this.content.length);
     }

@@ -138,6 +138,19 @@ const applyPatches = <T extends { applyPatch: (patch: unknown) => T }>(
   return current;
 };
 
+const applyBatch = <T extends { applyPatch: (patch: unknown) => T }>(
+  doc: T,
+  patches: unknown[],
+) => {
+  const maybeBatch = doc as T & {
+    applyPatchBatch?: (patches: unknown[]) => T;
+  };
+  if (typeof maybeBatch.applyPatchBatch === "function") {
+    return maybeBatch.applyPatchBatch(patches);
+  }
+  return applyPatches(doc, patches);
+};
+
 const measure = (label: string, fn: () => void) => {
   const start = performance.now();
   fn();
@@ -162,6 +175,8 @@ const main = () => {
   // Warmup
   applyPatches(immerBase, patches);
   applyPatches(immutableBase, patches);
+  applyBatch(immerBase, patches);
+  applyBatch(immutableBase, patches);
 
   const immerResult = measure("immer.applyPatch", () => {
     applyPatches(immerBase, patches);
@@ -169,10 +184,20 @@ const main = () => {
   const immutableResult = measure("immutable.applyPatch", () => {
     applyPatches(immutableBase, patches);
   });
+  const immerBatchResult = measure("immer.applyPatchBatch", () => {
+    applyBatch(immerBase, patches);
+  });
+  const immutableBatchResult = measure("immutable.applyPatchBatch", () => {
+    applyBatch(immutableBase, patches);
+  });
 
   const immerFinal = applyPatches(immerBase, patches).toString();
   const immutableFinal = applyPatches(immutableBase, patches).toString();
+  const immerBatchFinal = applyBatch(immerBase, patches).toString();
+  const immutableBatchFinal = applyBatch(immutableBase, patches).toString();
   const matches = immerFinal === immutableFinal && immutableFinal === finalJsonl;
+  const matchesBatch =
+    immerBatchFinal === immutableBatchFinal && immutableBatchFinal === finalJsonl;
 
   // eslint-disable-next-line no-console
   console.log(
@@ -182,12 +207,19 @@ const main = () => {
       `textLen=${opts.textLen}`,
       `seed=${opts.seed}`,
       `matches=${matches}`,
+      `matchesBatch=${matchesBatch}`,
     ].join(" "),
   );
   // eslint-disable-next-line no-console
   console.log(`${immerResult.label}: ${immerResult.ms.toFixed(2)} ms`);
   // eslint-disable-next-line no-console
   console.log(`${immutableResult.label}: ${immutableResult.ms.toFixed(2)} ms`);
+  // eslint-disable-next-line no-console
+  console.log(`${immerBatchResult.label}: ${immerBatchResult.ms.toFixed(2)} ms`);
+  // eslint-disable-next-line no-console
+  console.log(
+    `${immutableBatchResult.label}: ${immutableBatchResult.ms.toFixed(2)} ms`,
+  );
 };
 
 main();

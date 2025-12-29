@@ -205,7 +205,8 @@ export class PatchGraph {
     // Fast path: single head, no exclusions; reuse cached prefix if reachability unchanged.
     if (without.size === 0 && headTimes.length === 1) {
       const head = headTimes[0];
-      const doc = this.applyAllValue([head], without, true);
+      const cacheAll = opts.time != null;
+      const doc = this.applyAllValue([head], without, true, false, cacheAll);
       return doc;
     }
 
@@ -228,6 +229,7 @@ export class PatchGraph {
     without: Set<string>,
     useCache: boolean = false,
     allowMergeCache: boolean = false,
+    cacheAll: boolean = true,
   ): Document {
     let reachable: Set<string>;
     let orderedTimes: string[] | undefined;
@@ -293,6 +295,18 @@ export class PatchGraph {
       }
       if (patches.length > 0) {
         doc = this.codec.applyPatchBatch(doc, patches);
+      }
+    } else if (!cacheAll) {
+      const patches: unknown[] = [];
+      for (let i = startIndex; i < ordered.length; i++) {
+        const patch = ordered[i];
+        if (!patch.patch) continue;
+        patches.push(patch.patch);
+      }
+      if (patches.length > 0) {
+        doc = this.codec.applyPatchBatch(doc, patches);
+        const last = ordered[ordered.length - 1];
+        this.valueCache.set(last.time, { doc, count: ordered.length });
       }
     } else {
       for (let i = startIndex; i < ordered.length; i++) {

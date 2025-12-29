@@ -41,6 +41,7 @@ export interface Patch {
 // Immutable document contract used by the patch graph.
 export interface Document {
   applyPatch(patch: unknown): Document;
+  applyPatchBatch(patches: unknown[]): Document;
   makePatch(other: Document): unknown;
   isEqual(other?: Document): boolean;
   toString(): string;
