@@ -1,6 +1,23 @@
 # Patchflow Plans
 
-## Fundamentally fix Collisions Problem
+## Optimize patch application for the immer based document type
+
+Currently the implementation of src/db-document-immer.ts is not optimal.  Our goal is to make it much more efficient in terms of speed and memory.
+
+- [ ] Build a synthetic benchmark that applies N patches (e.g. 1k) against a document with deletes/sets + string columns; run for `db-document-immer`, `db-document-immutable`, and `string` codecs so we can compare.
+- [ ] Extend the patchflow core to apply patches in batches instead of one-by-one when computing a value; expose a batch API from session/graph.
+- [ ] Add `applyPatchBatch` to all codecs (string/immutable/immer). Start with a trivial implementation that loops and calls `applyPatch`.
+- [ ] Implement a fast `applyPatchBatch` for the immer codec:
+  - apply all patch operations inside a single `produce` call
+  - track dirty keys and update indexes once at the end (no per-op rebuilds)
+  - avoid allocating a new DbDocumentImmer per op
+- [ ] Improve immutable + string implementations:
+  - keep incremental index updates for immutable
+  - fast-path no-ops for string (or precompute diff application where possible)
+- [ ] Re-run the benchmark and record before/after numbers in this section.
+
+
+## (done) Fundamentally fix Collisions Problem
 
 Patchflow currently assumes that `Patch.time` is globally unique within a document’s patch graph. In practice this is false when the _same_ `userId` can commit concurrently from multiple clients/processes (e.g. browser + backend service in CoCalc-lite, or multiple browser tabs). When two patches share the same logical `time`, one can overwrite the other in stores that key patches by time, causing silent data loss/corruption.
 

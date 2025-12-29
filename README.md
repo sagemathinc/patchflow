@@ -47,6 +47,16 @@ The JSONL table documents are built on immutable.js and immer to make access to 
 - String columns use diff-match-patch, so long text edits store compact deltas instead of full rewrites.
 - JSONL/snapshot serialization is for portability; deterministic ordering is not guaranteed.
 
+## Document authoring checklist
+
+If you add a new Document type, aim to keep the following invariants:
+
+- Immutable instances: Document objects must never mutate after construction (PatchGraph caches them).
+- Deterministic applyPatch: same input patch yields the same output document every time.
+- Reasonable makePatch: support fast patch creation for “base -> draft” edits, and define a fallback for arbitrary pairs.
+- Stable equality: isEqual should be based on semantic content, not object identity.
+- Snapshot format: toString/fromString should round-trip and be safe to store, even if not deterministic.
+
 ## How Patchflow differs from CRDTs (Yjs/Automerge)
 
 - Simpler model: store a DAG of patches and replay/merge via three-way merge on divergent heads; no per-character CRDT metadata.
