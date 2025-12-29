@@ -5,6 +5,10 @@ Patchflow is a lightweight patch-DAG sync core factored out of the production [C
 - https://www.npmjs.com/package/patchflow
 - https://github.com/sagemathinc/patchflow
 
+## Status
+
+All planned features and optimizations are implemented.
+
 ## Architecture
 
 Edits flow from editors through Patchflow, out to persistence, and back as remote patches:

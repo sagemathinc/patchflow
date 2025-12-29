@@ -1,17 +1,17 @@
 # Patchflow Plans
 
-## Optimize patch application for the immer based document type
+## (done) Optimize patch application for the immer based document type
 
 Currently the implementation of src/db-document-immer.ts is not optimal.  Our goal is to make it much more efficient in terms of speed and memory.
 
 - [x] Build a synthetic benchmark that applies N patches \(e.g. 1k\) against a document with deletes/sets \+ string columns; run for `db-document-immer`, `db-document-immutable`, and `string` codecs so we can compare.
 - [x] Extend the patchflow core to apply patches in batches instead of one\-by\-one when computing a value; expose a batch API from session/graph.
 - [x] Add `applyPatchBatch` to all codecs \(string/immutable/immer\). Start with a trivial implementation that loops and calls `applyPatch`.
-- [ ] Implement a fast `applyPatchBatch` for the immer codec:
+- [x] Implement a fast `applyPatchBatch` for the immer codec:
   - apply all patch operations inside a single `produce` call
   - track dirty keys and update indexes once at the end \(no per\-op rebuilds\)
   - avoid allocating a new DbDocumentImmer per op
-- [ ] Improve immutable \+ string implementations:
+- [x] Improve immutable \+ string implementations:
   - keep incremental index updates for immutable
   - fast\-path no\-ops for string \(or precompute diff application where possible\)
 - [ ] Re\-run the benchmark and record before/after numbers in this section.
@@ -22,7 +22,7 @@ Patchflow currently assumes that `Patch.time` is globally unique within a docume
 
 The fix is to make patch identity be a **pair** `(time, clientId)` rather than the scalar `time`. The `clientId` is an opaque, per-client random identifier (configurable generator; default crypto-random). Ordering becomes lexicographic by `(time, clientId)`, and collisions become vanishingly unlikely (only possible if two clients pick the same random `clientId`).
 
-### PatchId encoding recommendation
+### \(done\) PatchId encoding recommendation
 
 To keep patch ids opaque but still debuggable, represent the `(time, clientId)` pair as a single string:
 
@@ -41,7 +41,7 @@ Notes:
 - Use monotone logical time per client: `t = max(lastT + 1, Date.now())` to avoid backwards clock jumps.
 - Provide small `encodePatchId/decodePatchId` helpers for debugging and tests. Most of patchflow should treat `PatchId` as opaque and only compare by string order.
 
-### Plan: switch patch identity from `time` to `(time, clientId)`
+### \(done\) Plan: switch patch identity from `time` to `(time, clientId)`
 
 1. **Introduce a first\-class patch id**
    - Add `PatchId` \(either `{ time: number; clientId: string }` or a canonical encoded string key\).
