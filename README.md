@@ -59,7 +59,7 @@ If you add a new Document type, aim to keep the following invariants:
 
 ## How Patchflow differs from CRDTs (Yjs/Automerge)
 
-- Simpler model: store a DAG of patches and replay/merge via three-way merge on divergent heads; no per-character CRDT metadata.
+- Simpler model: store a DAG of patches and merge by replaying from a common ancestor; no per-character CRDT metadata.
 - History focus: compact patch logs and explicit snapshots; easy to time-travel any committed version.
 - Transport/storage agnostic: you supply a PatchStore and optional file/presence adapters.
 - String-friendly semantics: diff-match-patch for strings (using our fixed fork [@cocalc/diff-match-patch](https://www.npmjs.com/package/@cocalc/diff-match-patch)); shallow map merges with deletes for structured fields.

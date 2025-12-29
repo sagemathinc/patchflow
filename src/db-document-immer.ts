@@ -7,7 +7,7 @@
  * - Patches use the legacy syncdb array form: [-1, deletes, 1, adds/updates].
  * - A codec factory wires primary keys + string columns into the patchflow DocCodec interface.
  */
-import { produce, type Draft } from "immer";
+import { enableMapSet, produce, type Draft } from "immer";
 import { applyPatch as applyStringPatch, makePatch as makeStringPatch } from "./dmp";
 import type { CompressedPatch } from "./dmp";
 import {
@@ -26,6 +26,8 @@ type DbRecord = JsMap | undefined;
 type Index = Map<string, Set<number>>;
 type Indexes = Map<string, Index>;
 export type DbPatch = Array<-1 | 1 | JsMap[]>;
+
+enableMapSet();
 
 export type WhereCondition = Record<string, unknown>;
 export type SetCondition = WhereCondition;
@@ -96,162 +98,209 @@ export class DbDocumentImmer implements Document {
   // Apply a batch of patches in one pass, updating indexes incrementally.
   public applyPatchBatch(patches: unknown[]): DbDocumentImmer {
     if (patches.length === 0) return this;
-    const nextRecords: DbRecord[] = this.records.slice();
-    const nextIndexes = this.cloneIndexes(this.indexes);
-    let nextSize = this.size;
+    // We use a single immer `produce` so we can "mutate" Map/Set indexes
+    // directly for simplicity, while immer handles the deep structural copy
+    // to preserve immutability semantics.
+    const nextState = produce(
+      { records: this.records, indexes: this.indexes, size: this.size },
+      (draft) => {
+        const { records, indexes } = draft;
 
-    const removeFromIndexes = (record: JsMap, idx: number): void => {
-      for (const field of this.primaryKeys) {
-        const val = record[field];
-        if (val == null) continue;
-        const key = toKey(val);
-        const index = nextIndexes.get(field);
-        if (!index) continue;
-        const set = index.get(key);
-        if (!set) continue;
-        set.delete(idx);
-        if (set.size === 0) {
-          index.delete(key);
-        }
-      }
-    };
+        const ensureIndex = (field: string): Index => {
+          const existing = indexes.get(field);
+          if (existing) return existing;
+          const created: Index = new Map();
+          indexes.set(field, created);
+          return created;
+        };
 
-    const addToIndexes = (record: JsMap, idx: number): void => {
-      for (const field of this.primaryKeys) {
-        const val = record[field];
-        if (val == null) continue;
-        const key = toKey(val);
-        let index = nextIndexes.get(field);
-        if (!index) {
-          index = new Map();
-          nextIndexes.set(field, index);
-        }
-        const set = index.get(key) ?? new Set<number>();
-        set.add(idx);
-        index.set(key, set);
-      }
-    };
+        const ensureSet = (index: Index, key: string): Set<number> => {
+          const existing = index.get(key);
+          if (existing) return existing;
+          const created = new Set<number>();
+          index.set(key, created);
+          return created;
+        };
 
-    const selectWithIndexes = (where: WhereCondition): Set<number> => {
-      const n = len(where as JsMap);
-      let result: Set<number> | undefined;
-      for (const field in where) {
-        const value = where[field];
-        const index = nextIndexes.get(field);
-        if (!index) {
-          throw new Error(`field '${field}' must be a primary key`);
-        }
-        const matches = index.get(toKey(value));
-        if (!matches) return new Set();
-        if (n === 1) return new Set(matches);
-        result = result ? this.intersect(result, matches) : new Set(matches);
-      }
-      if (!result) {
-        result = new Set();
-        nextRecords.forEach((rec, idx) => {
-          if (rec) result!.add(idx);
-        });
-      }
-      return result;
-    };
+        const removeFromIndexes = (record: JsMap, idx: number): void => {
+          for (const field of this.primaryKeys) {
+            const val = record[field];
+            if (val == null) continue;
+            const key = toKey(val);
+            const index = ensureIndex(field);
+            const set = index.get(key);
+            if (!set) continue;
+            set.delete(idx);
+            if (set.size === 0) {
+              index.delete(key);
+            }
+          }
+        };
 
-    const applyDelete = (payload?: JsMap[]): void => {
-      if (!payload || payload.length === 0) return;
-      for (const where of payload as WhereCondition[]) {
-        if (!isObject(where)) {
-          throw new Error("DbDocumentImmer.delete expects an object or array of objects");
-        }
-        const matches = selectWithIndexes(where as WhereCondition);
-        for (const idx of matches) {
-          const rec = nextRecords[idx];
-          if (!rec) continue;
-          removeFromIndexes(rec, idx);
-          nextRecords[idx] = undefined;
-          nextSize -= 1;
-        }
-      }
-    };
+        const addToIndexes = (record: JsMap, idx: number): void => {
+          for (const field of this.primaryKeys) {
+            const val = record[field];
+            if (val == null) continue;
+            const key = toKey(val);
+            const index = ensureIndex(field);
+            const set = ensureSet(index, key);
+            set.add(idx);
+          }
+        };
 
-    const applySetBatch = (payload?: JsMap[]): void => {
-      if (!payload || payload.length === 0) return;
-      for (const obj of payload as SetCondition[]) {
-        if (!isObject(obj)) {
-          throw new Error("DbDocumentImmer.set expects an object or array of objects");
-        }
-        const { where, set } = this.parse(obj as JsMap);
-        const matches = selectWithIndexes(where);
-        if (matches.size > 0) {
-          for (const idx of matches) {
-            const current = nextRecords[idx];
-            if (!current) continue;
-            const next = this.applySet(current, set);
-            if (next === current) continue;
-            if (this.primaryKeys.size > 0) {
-              for (const field of this.primaryKeys) {
-                const oldVal = current[field];
-                const newVal = next[field];
-                if (!deepEqual(oldVal, newVal)) {
-                  if (oldVal != null) {
-                    const index = nextIndexes.get(field);
-                    const set0 = index?.get(toKey(oldVal));
-                    if (set0) {
-                      set0.delete(idx);
-                      if (set0.size === 0) index?.delete(toKey(oldVal));
+        const selectWithIndexes = (where: WhereCondition): Set<number> => {
+          const n = len(where as JsMap);
+          let result: Set<number> | undefined;
+          for (const field in where) {
+            const value = where[field];
+            const index = indexes.get(field);
+            if (!index) {
+              throw new Error(`field '${field}' must be a primary key`);
+            }
+            const matches = index.get(toKey(value));
+            if (!matches) return new Set();
+            if (n === 1) return new Set(matches);
+            result = result ? this.intersect(result, matches) : new Set(matches);
+          }
+          if (!result) {
+            result = new Set();
+            records.forEach((rec, idx) => {
+              if (rec) result!.add(idx);
+            });
+          }
+          return result;
+        };
+
+        const applySetToDraft = (current: Draft<JsMap>, set: JsMap): void => {
+          for (const field in set) {
+            const value = set[field];
+            if (value === null) {
+              delete current[field];
+              continue;
+            }
+            if (this.stringCols.has(field)) {
+              if (isArray(value)) {
+                const next = applyStringPatch(
+                  value as CompressedPatch,
+                  (current[field] as string) ?? "",
+                )[0];
+                current[field] = next;
+                continue;
+              }
+              if (typeof value !== "string") {
+                throw new Error(`'${field}' must be a string`);
+              }
+            }
+            if (isObject(current[field]) && isObject(value)) {
+              const base = current[field] as JsMap;
+              const change = value as JsMap;
+              for (const key of Object.keys(change)) {
+                const val = change[key];
+                if (val === null || val === undefined) {
+                  delete (base as JsMap)[key];
+                } else {
+                  (base as JsMap)[key] = val;
+                }
+              }
+            } else {
+              current[field] = value;
+            }
+          }
+        };
+
+        const applyDelete = (payload?: JsMap[]): void => {
+          if (!payload || payload.length === 0) return;
+          for (const where of payload as WhereCondition[]) {
+            if (!isObject(where)) {
+              throw new Error("DbDocumentImmer.delete expects an object or array of objects");
+            }
+            const matches = selectWithIndexes(where as WhereCondition);
+            for (const idx of matches) {
+              const rec = records[idx];
+              if (!rec) continue;
+              removeFromIndexes(rec, idx);
+              records[idx] = undefined;
+              draft.size -= 1;
+            }
+          }
+        };
+
+        const applySetBatch = (payload?: JsMap[]): void => {
+          if (!payload || payload.length === 0) return;
+          for (const obj of payload as SetCondition[]) {
+            if (!isObject(obj)) {
+              throw new Error("DbDocumentImmer.set expects an object or array of objects");
+            }
+            const { where, set } = this.parse(obj as JsMap);
+            const matches = selectWithIndexes(where);
+            if (matches.size > 0) {
+              for (const idx of matches) {
+                const current = records[idx];
+                if (!current) continue;
+                const before = { ...current };
+                applySetToDraft(current, set);
+                for (const field of this.primaryKeys) {
+                  const oldVal = before[field];
+                  const newVal = current[field];
+                  if (!deepEqual(oldVal, newVal)) {
+                    if (oldVal != null) {
+                      const index = ensureIndex(field);
+                      const set0 = index.get(toKey(oldVal));
+                      if (set0) {
+                        set0.delete(idx);
+                        if (set0.size === 0) {
+                          index.delete(toKey(oldVal));
+                        }
+                      }
                     }
-                  }
-                  if (newVal != null) {
-                    let index = nextIndexes.get(field);
-                    if (!index) {
-                      index = new Map();
-                      nextIndexes.set(field, index);
+                    if (newVal != null) {
+                      const index = ensureIndex(field);
+                      const set1 = ensureSet(index, toKey(newVal));
+                      set1.add(idx);
                     }
-                    const set1 = index.get(toKey(newVal)) ?? new Set<number>();
-                    set1.add(idx);
-                    index.set(toKey(newVal), set1);
                   }
                 }
               }
+              continue;
             }
-            nextRecords[idx] = next;
+            // Insert
+            const insertObj: JsMap = { ...obj };
+            for (const field of this.stringCols) {
+              if (insertObj[field] != null && isArray(insertObj[field])) {
+                delete insertObj[field];
+              }
+            }
+            this.stripNulls(insertObj);
+            const idx = records.length;
+            records.push(insertObj);
+            draft.size += 1;
+            addToIndexes(insertObj, idx);
           }
-          continue;
-        }
-        // Insert
-        const insertObj: JsMap = { ...obj };
-        for (const field of this.stringCols) {
-          if (insertObj[field] != null && isArray(insertObj[field])) {
-            delete insertObj[field];
-          }
-        }
-        this.stripNulls(insertObj);
-        const idx = nextRecords.length;
-        nextRecords.push(insertObj);
-        nextSize += 1;
-        addToIndexes(insertObj, idx);
-      }
-    };
+        };
 
-    for (const patch of patches) {
-      if (!Array.isArray(patch)) {
-        throw new Error("DbPatch must be an array");
-      }
-      for (let i = 0; i < patch.length; i += 2) {
-        const op = patch[i];
-        const payload = patch[i + 1] as JsMap[] | undefined;
-        if (op === -1) {
-          applyDelete(payload);
-        } else if (op === 1) {
-          applySetBatch(payload);
+        for (const patch of patches) {
+          if (!Array.isArray(patch)) {
+            throw new Error("DbPatch must be an array");
+          }
+          for (let i = 0; i < patch.length; i += 2) {
+            const op = patch[i];
+            const payload = patch[i + 1] as JsMap[] | undefined;
+            if (op === -1) {
+              applyDelete(payload);
+            } else if (op === 1) {
+              applySetBatch(payload);
+            }
+          }
         }
-      }
-    }
+      },
+    );
 
     return new DbDocumentImmer(
       this.primaryKeys,
       this.stringCols,
-      nextRecords,
-      nextIndexes,
-      nextSize,
+      nextState.records,
+      nextState.indexes,
+      nextState.size,
     );
   }
 
@@ -398,19 +447,6 @@ export class DbDocumentImmer implements Document {
   private withRecords(records: DbRecord[]): DbDocumentImmer {
     const { indexes, size } = this.rebuildIndexes(records);
     return new DbDocumentImmer(this.primaryKeys, this.stringCols, records, indexes, size);
-  }
-
-  // Deep-clone indexes so we can mutate them safely in batch operations.
-  private cloneIndexes(indexes: Indexes): Indexes {
-    const next: Indexes = new Map();
-    for (const [field, index] of indexes.entries()) {
-      const nextIndex: Index = new Map();
-      for (const [key, set] of index.entries()) {
-        nextIndex.set(key, new Set(set));
-      }
-      next.set(field, nextIndex);
-    }
-    return next;
   }
 
   // Build indexes and size from a record array.
