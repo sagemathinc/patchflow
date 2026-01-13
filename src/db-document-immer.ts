@@ -22,6 +22,8 @@ import {
 } from "./db-util";
 import type { DocCodec, Document } from "./types";
 
+const DEFAULT_JSONL_SIZE_FACTOR = 1000;
+
 type DbRecord = JsMap | undefined;
 type Index = Map<string, Set<number>>;
 type Indexes = Map<string, Index>;
@@ -37,8 +39,7 @@ export class DbDocumentImmer implements Document {
   private readonly stringCols: Set<string>;
   private readonly records: DbRecord[];
   private readonly indexes: Indexes;
-  private readonly size: number;
-  private toStrCache?: string;
+  private readonly recordCount: number;
 
   // Build a new document with primary keys, string columns, and optional prebuilt state.
   constructor(
@@ -56,27 +57,25 @@ export class DbDocumentImmer implements Document {
     this.records = records;
     if (indexes && size !== undefined) {
       this.indexes = indexes;
-      this.size = size;
+      this.recordCount = size;
     } else {
-      const { indexes: built, size: computed } = this.rebuildIndexes(records);
+      const { indexes: built, recordCount } = this.rebuildIndexes(records);
       this.indexes = built;
-      this.size = computed;
+      this.recordCount = recordCount;
     }
   }
 
   // Serialize the document as sorted JSONL.
   public toString(): string {
-    if (this.toStrCache != null) return this.toStrCache;
     const obj = this.get({}) as JsMap[];
-    this.toStrCache = toStr(obj);
-    return this.toStrCache;
+    return toStr(obj);
   }
 
   // Check equality by primary-key/value contents.
   public isEqual(other?: DbDocumentImmer): boolean {
     if (!other) return false;
     if (this === other) return true;
-    if (this.size !== other.size) return false;
+    if (this.recordCount !== other.recordCount) return false;
     const thisMap = this.primaryKeyMap();
     const otherMap = other.primaryKeyMap();
     if (thisMap.size !== otherMap.size) return false;
@@ -102,7 +101,7 @@ export class DbDocumentImmer implements Document {
     // directly for simplicity, while immer handles the deep structural copy
     // to preserve immutability semantics.
     const nextState = produce(
-      { records: this.records, indexes: this.indexes, size: this.size },
+      { records: this.records, indexes: this.indexes, recordCount: this.recordCount },
       (draft) => {
         const { records, indexes } = draft;
 
@@ -220,7 +219,7 @@ export class DbDocumentImmer implements Document {
               if (!rec) continue;
               removeFromIndexes(rec, idx);
               records[idx] = undefined;
-              draft.size -= 1;
+              draft.recordCount -= 1;
             }
           }
         };
@@ -273,7 +272,7 @@ export class DbDocumentImmer implements Document {
             this.stripNulls(insertObj);
             const idx = records.length;
             records.push(insertObj);
-            draft.size += 1;
+            draft.recordCount += 1;
             addToIndexes(insertObj, idx);
           }
         };
@@ -300,13 +299,13 @@ export class DbDocumentImmer implements Document {
       this.stringCols,
       nextState.records,
       nextState.indexes,
-      nextState.size,
+      nextState.recordCount,
     );
   }
 
   // Compute a patch from this document to another.
   public makePatch(other: DbDocumentImmer): DbPatch {
-    if (other.size === 0) {
+    if (other.recordCount === 0) {
       return [-1, [{}]];
     }
     const thisMap = this.primaryKeyMap();
@@ -440,25 +439,29 @@ export class DbDocumentImmer implements Document {
 
   // Count defined records.
   public count(): number {
-    return this.size;
+    return this.recordCount;
+  }
+
+  public size(): number {
+    return this.recordCount * DEFAULT_JSONL_SIZE_FACTOR;
   }
 
   // Replace underlying records and rebuild indexes.
   private withRecords(records: DbRecord[]): DbDocumentImmer {
-    const { indexes, size } = this.rebuildIndexes(records);
-    return new DbDocumentImmer(this.primaryKeys, this.stringCols, records, indexes, size);
+    const { indexes, recordCount } = this.rebuildIndexes(records);
+    return new DbDocumentImmer(this.primaryKeys, this.stringCols, records, indexes, recordCount);
   }
 
   // Build indexes and size from a record array.
-  private rebuildIndexes(records: DbRecord[]): { indexes: Indexes; size: number } {
+  private rebuildIndexes(records: DbRecord[]): { indexes: Indexes; recordCount: number } {
     const indexes: Indexes = new Map();
     for (const field of this.primaryKeys) {
       indexes.set(field, new Map());
     }
-    let size = 0;
+    let recordCount = 0;
     records.forEach((rec, idx) => {
       if (!rec) return;
-      size += 1;
+      recordCount += 1;
       for (const field of this.primaryKeys) {
         const val = rec[field];
         if (val == null) continue;
@@ -469,7 +472,7 @@ export class DbDocumentImmer implements Document {
         index.set(k, set);
       }
     });
-    return { indexes, size };
+    return { indexes, recordCount };
   }
 
   // Select matching record indices via primary-key index.

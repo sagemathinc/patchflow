@@ -1,6 +1,7 @@
 import { PatchGraph } from "./patch-graph";
 import { StringCodec, StringDocument } from "./string-document";
 import { threeWayMerge } from "./dmp";
+import { createImmerDbCodec } from "./db-document-immer";
 import type { DocCodec, Document } from "./types";
 import { legacyPatchId } from "./patch-id";
 
@@ -220,11 +221,44 @@ describe("PatchGraph caching", () => {
     count(): number {
       return this.content.length;
     }
+    size(): number {
+      return this.count();
+    }
+  }
+
+  class SizedDoc extends FakeDoc {
+    count(): number {
+      return 1;
+    }
+    size(): number {
+      return 2;
+    }
+    applyPatch(patch: unknown): Document {
+      return new SizedDoc(this.content + String(patch ?? ""));
+    }
   }
 
   const makeCodec = (applyCount: { n: number }): DocCodec => ({
     fromString: (s: string) => new FakeDoc(s),
     toString: (d: Document) => (d as FakeDoc).toString(),
+    applyPatch: (doc: Document, patch: unknown) => {
+      applyCount.n += 1;
+      return doc.applyPatch(patch);
+    },
+    applyPatchBatch: (doc: Document, patches: unknown[]) => {
+      let current = doc;
+      for (const patch of patches) {
+        applyCount.n += 1;
+        current = current.applyPatch(patch);
+      }
+      return current;
+    },
+    makePatch: (a: Document, b: Document) => a.makePatch(b),
+  });
+
+  const makeSizedCodec = (applyCount: { n: number }): DocCodec => ({
+    fromString: (s: string) => new SizedDoc(s),
+    toString: (d: Document) => (d as SizedDoc).toString(),
     applyPatch: (doc: Document, patch: unknown) => {
       applyCount.n += 1;
       return doc.applyPatch(patch);
@@ -315,5 +349,60 @@ describe("PatchGraph caching", () => {
     const v4 = graph.value({ time: t4 });
     expect(v4.toString()).toBe("ABCD");
     expect(applyCount.n).toBe(1); // only the new patch was applied
+  });
+
+  it("evicts cached values based on size budget", () => {
+    const applyCount = { n: 0 };
+    const graph = new PatchGraph({
+      codec: makeSizedCodec(applyCount),
+      valueCacheMaxSize: 3,
+    });
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
+    graph.add([
+      { time: t1, parents: [], patch: "A" },
+      { time: t2, parents: [t1], patch: "B" },
+    ]);
+
+    graph.value({ time: t1 });
+    graph.value({ time: t2 });
+    applyCount.n = 0;
+
+    graph.value({ time: t1 });
+    expect(applyCount.n).toBe(1);
+  });
+
+  it("weights jsonl docs by record count", () => {
+    const baseCodec = createImmerDbCodec({ primaryKeys: ["id"] });
+    const applyCount = { n: 0 };
+    const codec: DocCodec = {
+      ...baseCodec,
+      applyPatch: (doc: Document, patch: unknown) => {
+        applyCount.n += 1;
+        return baseCodec.applyPatch(doc, patch);
+      },
+      applyPatchBatch: (doc: Document, patches: unknown[]) => {
+        let current = doc;
+        for (const patch of patches) {
+          applyCount.n += 1;
+          current = baseCodec.applyPatch(current, patch);
+        }
+        return current;
+      },
+    };
+    const graph = new PatchGraph({ codec, valueCacheMaxSize: 1500 });
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
+    graph.add([
+      { time: t1, parents: [], patch: [1, [{ id: 1, val: "a" }]] },
+      { time: t2, parents: [t1], patch: [1, [{ id: 1, val: "b" }]] },
+    ]);
+
+    graph.value({ time: t1 });
+    graph.value({ time: t2 });
+    applyCount.n = 0;
+
+    graph.value({ time: t1 });
+    expect(applyCount.n).toBe(1);
   });
 });

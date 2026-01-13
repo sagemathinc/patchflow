@@ -50,6 +50,7 @@ export interface Document {
   getOne?(key?: unknown): unknown;
   delete?(key?: unknown): Document;
   changes?(prev?: Document): unknown;
+  size?(): number;
   count(): number;
 }
 

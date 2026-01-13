@@ -63,7 +63,8 @@ export class Session extends EventEmitter {
   private unsubscribe?: () => void;
   private fileUnsubscribe?: () => void;
   private pendingWrite?: Promise<void>;
-  private dirtyContent?: string;
+  private dirtyDoc?: Document;
+  private writingDoc?: Document;
   private persistedContent?: string;
   private suppressFileChanges = 0;
   private hasMoreHistory = false;
@@ -418,12 +419,11 @@ export class Session extends EventEmitter {
       this.workingCopy = { base: baseDoc, draft: liveDoc };
     }
     this.doc = liveDoc;
-    const text = this.codec.toString(liveDoc);
     this.emit("change", this.doc);
 
     // If a file adapter is present, keep it in sync
     if (this.fileAdapter && this.doc) {
-      this.queueFileWrite(text);
+      this.queueFileWriteDoc(liveDoc);
     }
   }
 
@@ -554,19 +554,26 @@ export class Session extends EventEmitter {
   }
 
   // Record desired content and start a write flush if idle.
-  private queueFileWrite(content: string): void {
+  private queueFileWriteDoc(doc: Document): void {
     if (!this.fileAdapter) return;
-    if (this.persistedContent === content && !this.dirtyContent) return;
-    this.dirtyContent = content;
+    if (this.writingDoc && this.writingDoc.isEqual(doc)) return;
+    if (this.dirtyDoc && this.dirtyDoc.isEqual(doc)) return;
+    this.dirtyDoc = doc;
     if (this.pendingWrite) return;
     this.pendingWrite = this.flushFileQueue();
   }
 
   // Sequentially write queued content to the file adapter with base hints.
   private async flushFileQueue(): Promise<void> {
-    while (this.dirtyContent !== undefined) {
-      const content = this.dirtyContent;
-      this.dirtyContent = undefined;
+    while (this.dirtyDoc !== undefined) {
+      const doc = this.dirtyDoc;
+      this.dirtyDoc = undefined;
+      this.writingDoc = doc;
+      const content = this.codec.toString(doc);
+      if (this.persistedContent === content) {
+        this.writingDoc = undefined;
+        continue;
+      }
       this.suppressFileChanges += 1;
       try {
         const hasBase = this.persistedContent !== undefined;
@@ -579,6 +586,7 @@ export class Session extends EventEmitter {
         this.emit("file-error", err);
       } finally {
         this.suppressFileChanges = Math.max(0, this.suppressFileChanges - 1);
+        this.writingDoc = undefined;
       }
     }
     this.pendingWrite = undefined;

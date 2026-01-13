@@ -26,6 +26,8 @@ import {
 } from "./db-util";
 import type { DocCodec, Document } from "./types";
 
+const DEFAULT_JSONL_SIZE_FACTOR = 1000;
+
 type RecordValue = ImMap<string, unknown> | undefined;
 type Records = List<RecordValue>;
 type Index = ImMap<string, ImSet<number>>;
@@ -47,8 +49,7 @@ export class DbDocument implements Document {
   private everything: ImSet<number>;
   private indexes: Indexes;
   private changeTracker: ChangeTracker;
-  public readonly size: number;
-  private toStrCache?: string;
+  private readonly recordCount: number;
 
   // Build a document backed by immutable.js with optional precomputed state.
   constructor(
@@ -66,26 +67,22 @@ export class DbDocument implements Document {
     this.stringCols = new Set(stringCols);
     this.records = records;
     this.everything = everything ?? this.initEverything();
-    this.size = this.everything.size;
+    this.recordCount = this.everything.size;
     this.indexes = indexes ?? this.initIndexes();
     this.changeTracker = changeTracker ?? this.initChangeTracker();
   }
 
   // Serialize as sorted JSONL.
   public toString(): string {
-    if (this.toStrCache != null) {
-      return this.toStrCache;
-    }
     const obj = this.get({}).toJS() as JsMap[];
-    this.toStrCache = toStr(obj);
-    return this.toStrCache;
+    return toStr(obj);
   }
 
   // Check equality by comparing record contents.
   public isEqual(other?: DbDocument): boolean {
     if (other == null) return false;
     if (this.records === other.records) return true;
-    if (this.size !== other.size) return false;
+    if (this.recordCount !== other.recordCount) return false;
     return ImSet(this.records).add(undefined).equals(ImSet(other.records).add(undefined));
   }
 
@@ -118,7 +115,7 @@ export class DbDocument implements Document {
 
   // Compute a patch from this document to another.
   public makePatch(other: DbDocument): DbPatch {
-    if (other.size === 0) {
+    if (other.recordCount === 0) {
       return [-1, [{}]];
     }
 
@@ -401,7 +398,11 @@ export class DbDocument implements Document {
 
   // Count defined records.
   public count(): number {
-    return this.size;
+    return this.recordCount;
+  }
+
+  public size(): number {
+    return this.recordCount * DEFAULT_JSONL_SIZE_FACTOR;
   }
 
   // Build the set of defined record indices.

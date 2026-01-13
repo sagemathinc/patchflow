@@ -49,6 +49,10 @@ export class StringDocument implements Document {
   public count(): number {
     return this.value.length;
   }
+
+  public size(): number {
+    return this.value.length;
+  }
 }
 
 export const StringCodec = {

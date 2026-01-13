@@ -3,7 +3,7 @@ import { StringCodec, StringDocument } from "./string-document";
 import { MemoryPatchStore } from "./adapters/memory-patch-store";
 import { MemoryFileAdapter } from "./adapters/memory-file-adapter";
 import { MemoryPresenceAdapter } from "./adapters/memory-presence-adapter";
-import type { CursorSnapshot, PatchEnvelope } from "./types";
+import type { CursorSnapshot, PatchEnvelope, Document } from "./types";
 import { decodePatchId, legacyPatchId } from "./patch-id";
 
 describe("Session", () => {
@@ -240,6 +240,23 @@ describe("Session", () => {
     expect(session.getDocument().toString()).toBe("");
   });
 
+  it("does not stringify when no file adapter is present", async () => {
+    const store = new MemoryPatchStore();
+    let toStringCalls = 0;
+    const codec = {
+      ...StringCodec,
+      toString: (doc: Document) => {
+        toStringCalls += 1;
+        return StringCodec.toString(doc as StringDocument);
+      },
+    };
+    const session = new Session({ codec, patchStore: store, userId: 1 });
+    await session.init();
+    await session.commit(new StringDocument("A"));
+    await session.commit(new StringDocument("AB"));
+    expect(toStringCalls).toBe(0);
+  });
+
   it("syncs file adapter on commit and reacts to external file changes", async () => {
     const store = new MemoryPatchStore();
     const file = new MemoryFileAdapter("");
@@ -256,6 +273,44 @@ describe("Session", () => {
     await file.write("external");
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(session.getDocument().toString()).toBe("external");
+  });
+
+  it("stringifies only when flushing file writes", async () => {
+    const store = new MemoryPatchStore();
+    let toStringCalls = 0;
+    let writes = 0;
+    let current = "";
+    const codec = {
+      ...StringCodec,
+      toString: (doc: Document) => {
+        toStringCalls += 1;
+        return StringCodec.toString(doc as StringDocument);
+      },
+    };
+    const file = {
+      async read(): Promise<string> {
+        return current;
+      },
+      async write(content: string): Promise<void> {
+        writes += 1;
+        current = content;
+      },
+      watch() {
+        return () => {};
+      },
+    };
+    const session = new Session({
+      codec,
+      patchStore: store,
+      userId: 1,
+      fileAdapter: file,
+    });
+    await session.init();
+    await session.commit(new StringDocument("one"));
+    await session.commit(new StringDocument("two"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(writes).toBe(2);
+    expect(toStringCalls).toBe(writes + 1);
   });
 
   it("publishes presence on commit/undo/redo via presence adapter", async () => {

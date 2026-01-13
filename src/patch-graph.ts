@@ -6,9 +6,15 @@ import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions }
 type PatchMap = Map<string, Patch>;
 
 const DEFAULT_DEDUP_TOLERANCE = 3000;
+const DEFAULT_VALUE_CACHE_MAX_ENTRIES = 100;
+const DEFAULT_VALUE_CACHE_MAX_SIZE = 10_000_000;
 
-// TOOD: make this easily configurable
-const VALUE_CACHE_SIZE = 32;
+export type PatchGraphOptions = {
+  codec: DocCodec;
+  mergeStrategy?: MergeStrategy;
+  valueCacheMaxEntries?: number;
+  valueCacheMaxSize?: number;
+};
 
 function patchCmp(a: Patch, b: Patch): number {
   return comparePatchId(a.time, b.time);
@@ -21,9 +27,7 @@ export class PatchGraph {
   public fileTimeDedupTolerance = DEFAULT_DEDUP_TOLERANCE;
   private mergeStrategy: MergeStrategy;
   // Cache single-head values keyed by patch time with a completeness count to avoid full replays.
-  private valueCache = new LRUCache<string, { doc: Document; count: number }>({
-    max: VALUE_CACHE_SIZE,
-  });
+  private valueCache: LRUCache<string, { doc: Document; count: number }>;
   // Cache reachability/topo for single heads.
   private reachabilityCache = new globalThis.Map<
     string,
@@ -34,9 +38,29 @@ export class PatchGraph {
   // Cache versions list.
   private versionsCache?: string[];
 
-  constructor(opts: { codec: DocCodec; mergeStrategy?: MergeStrategy }) {
+  constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
     this.mergeStrategy = opts.mergeStrategy ?? "three-way";
+    const maxSize = opts.valueCacheMaxSize ?? DEFAULT_VALUE_CACHE_MAX_SIZE;
+    const maxEntries = opts.valueCacheMaxEntries ?? DEFAULT_VALUE_CACHE_MAX_ENTRIES;
+    if (maxSize != null) {
+      const cacheOpts = {
+        max: maxEntries,
+        maxSize,
+        sizeCalculation: (value: { doc: Document; count: number }) => {
+          const size = value?.doc?.size?.() ?? value?.doc?.count?.();
+          if (!Number.isFinite(size) || size <= 0) return 1;
+          return size;
+        },
+      } as const;
+      this.valueCache = new LRUCache<string, { doc: Document; count: number }>({
+        ...cacheOpts,
+      });
+    } else {
+      this.valueCache = new LRUCache<string, { doc: Document; count: number }>({
+        max: maxEntries,
+      });
+    }
   }
 
   add(input: Patch[]): void {
