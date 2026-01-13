@@ -105,6 +105,22 @@ describe.each(backends)("%s DbDocument", ({ name, codec }) => {
     expect(toPlain(meta)).toEqual({ a: 1, c: 3 });
   });
 
+  if (name === "immer") {
+    it("applies map patches without mutating frozen nested objects", () => {
+      const empty = newDoc();
+      const frozen = Object.freeze({ reasoning: Object.freeze({ foo: "bar" }) });
+      const base = empty.set({ id: 1, meta: frozen } as JsMap);
+      const next = base.set({
+        id: 1,
+        meta: { reasoning: { foo: "baz" }, extra: 1 },
+      } as JsMap);
+      const patch = base.makePatch(next);
+      const updated = base.applyPatch(patch);
+      const meta = getField(updated.getOne({ id: 1 }), "meta");
+      expect(toPlain(meta)).toEqual({ reasoning: { foo: "baz" }, extra: 1 });
+    });
+  }
+
   if (name === "immutable") {
     it("preserves immutable map fields passed into set", () => {
       const empty = newDoc();

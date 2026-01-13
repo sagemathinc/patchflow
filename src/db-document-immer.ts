@@ -191,16 +191,7 @@ export class DbDocumentImmer implements Document {
               }
             }
             if (isObject(current[field]) && isObject(value)) {
-              const base = current[field] as JsMap;
-              const change = value as JsMap;
-              for (const key of Object.keys(change)) {
-                const val = change[key];
-                if (val === null || val === undefined) {
-                  delete (base as JsMap)[key];
-                } else {
-                  (base as JsMap)[key] = val;
-                }
-              }
+              current[field] = this.mergeObject(current[field] as JsMap, value as JsMap);
             } else {
               current[field] = value;
             }
