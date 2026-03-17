@@ -2,6 +2,7 @@
 export * from "./dmp";
 export * from "./types";
 export * from "./patch-id";
+export * from "./patch-utils";
 export * from "./patch-graph";
 export * from "./string-document";
 export * from "./session";
