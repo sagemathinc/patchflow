@@ -63,8 +63,9 @@ export class PatchGraph {
     }
   }
 
-  add(input: Patch[]): void {
-    if (input.length === 0) return;
+  add(input: Patch[]): Patch[] {
+    const added: Patch[] = [];
+    if (input.length === 0) return added;
     for (const patch of input) {
       const existing = this.patches.get(patch.time);
       if (existing) {
@@ -89,11 +90,14 @@ export class PatchGraph {
         kids.add(normalized.time);
         this.children = this.children.set(parent, kids);
       }
+      added.push(normalized);
     }
+    if (added.length === 0) return added;
     // Any structural change invalidates cached reachability/versions/merges.
     this.reachabilityCache.clear();
     this.mergeCache.clear();
     this.versionsCache = undefined;
+    return added;
   }
 
   getHeads(): string[] {

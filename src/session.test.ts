@@ -78,6 +78,48 @@ describe("Session", () => {
     expect(sessionA.getDocument().toString()).toBe("hello world");
   });
 
+  it("applies remote patch batches with one change event and skips duplicate replay", async () => {
+    const store = new MemoryPatchStore();
+    const session = new Session({ codec: StringCodec, patchStore: store, userId: 1 });
+    await session.init();
+
+    const base = new StringDocument("");
+    const docA = new StringDocument("a");
+    const docB = new StringDocument("ab");
+    const t1 = legacyPatchId(1);
+    const t2 = legacyPatchId(2);
+    const envA: PatchEnvelope = {
+      time: t1,
+      patch: base.makePatch(docA),
+      parents: [],
+      userId: 2,
+      version: 1,
+    };
+    const envB: PatchEnvelope = {
+      time: t2,
+      patch: docA.makePatch(docB),
+      parents: [t1],
+      userId: 2,
+      version: 2,
+    };
+    const changes: string[] = [];
+    const patches: PatchEnvelope[] = [];
+    session.on("change", (doc) => changes.push(doc.toString()));
+    session.on("patch", (env) => patches.push(env));
+
+    expect(session.applyRemoteBatch([envA, envB])).toEqual([envA, envB]);
+
+    expect(session.getDocument().toString()).toBe("ab");
+    expect(changes).toEqual(["ab"]);
+    expect(patches).toEqual([envA, envB]);
+
+    changes.length = 0;
+    patches.length = 0;
+    expect(session.applyRemoteBatch([envA, envB])).toEqual([]);
+    expect(changes).toEqual([]);
+    expect(patches).toEqual([]);
+  });
+
   it("carries patch metadata through commit and remote apply", async () => {
     const store = new MemoryPatchStore();
     const sessionA = new Session({ codec: StringCodec, patchStore: store, userId: 1 });

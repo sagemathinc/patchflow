@@ -293,15 +293,30 @@ export class Session extends EventEmitter {
 
   // Merge a remote patch and refresh the current document.
   applyRemote(env: PatchEnvelope): void {
-    this.graph.add([env]);
-    this.lastTimeMs = Math.max(this.lastTimeMs, decodePatchId(env.time).timeMs);
-    if (env.version != null) {
-      this.maxVersion = Math.max(this.maxVersion, env.version);
-    } else {
-      this.maxVersion = Math.max(this.maxVersion, this.graph.versions().length);
+    this.applyRemoteBatch([env]);
+  }
+
+  // Merge a batch of remote patches and refresh the current document once.
+  // Returns the patches that were new to this session; duplicate replay is a
+  // no-op and does not emit change/patch events.
+  applyRemoteBatch(envs: PatchEnvelope[]): PatchEnvelope[] {
+    const added = this.graph.add(envs);
+    if (added.length === 0) {
+      return [];
+    }
+    for (const env of added) {
+      this.lastTimeMs = Math.max(this.lastTimeMs, decodePatchId(env.time).timeMs);
+      if (env.version != null) {
+        this.maxVersion = Math.max(this.maxVersion, env.version);
+      } else {
+        this.maxVersion = Math.max(this.maxVersion, this.graph.versions().length);
+      }
     }
     this.syncDoc();
-    this.emit("patch", env);
+    for (const env of added) {
+      this.emit("patch", env);
+    }
+    return added;
   }
 
   // Step the undo pointer backward and recompute the doc.
