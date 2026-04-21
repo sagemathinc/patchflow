@@ -1,6 +1,6 @@
 {
   "name": "patchflow",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "private": false,
   "description": "Lightweight patch-based directed acyclic graph realtime sync core",
   "license": "MIT",
