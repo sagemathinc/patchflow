@@ -188,11 +188,7 @@ describe("PatchGraph caching", () => {
       return new FakeDoc(this.content + String(patch ?? ""));
     }
     applyPatchBatch(patches: unknown[]): Document {
-      let current: Document = this;
-      for (const patch of patches) {
-        current = current.applyPatch(patch);
-      }
-      return current;
+      return patches.reduce<Document>((current, patch) => current.applyPatch(patch), this);
     }
     makePatch(other: Document): unknown {
       return (other as FakeDoc).content.slice(this.content.length);

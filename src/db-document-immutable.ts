@@ -106,11 +106,7 @@ export class DbDocument implements Document {
   }
 
   public applyPatchBatch(patches: unknown[]): DbDocument {
-    let current: DbDocument = this;
-    for (const patch of patches) {
-      current = current.applyPatch(patch);
-    }
-    return current;
+    return patches.reduce<DbDocument>((current, patch) => current.applyPatch(patch), this);
   }
 
   // Compute a patch from this document to another.

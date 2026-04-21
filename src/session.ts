@@ -37,8 +37,6 @@ export type SessionOptions = {
   presenceAdapter?: PresenceAdapter;
 };
 
-let didWarnWeakClientIdEntropy = false;
-
 /**
  * Session orchestrates a local Document against a PatchGraph and a PatchStore.
  * It handles local commits, remote patches, and basic undo/redo of local changes.

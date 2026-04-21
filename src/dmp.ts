@@ -32,7 +32,7 @@ export function applyPatch(patch: CompressedPatch, s: string): [string, boolean]
   let result;
   try {
     result = dmp.patch_apply(decompressPatch(patch), s);
-  } catch (err) {
+  } catch {
     return [s, false];
   }
   const clean = result[1].every(Boolean);

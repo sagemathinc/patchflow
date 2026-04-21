@@ -20,11 +20,7 @@ export class StringDocument implements Document {
   }
 
   public applyPatchBatch(patches: CompressedPatch[]): StringDocument {
-    let current: StringDocument = this;
-    for (const patch of patches) {
-      current = current.applyPatch(patch);
-    }
-    return current;
+    return patches.reduce<StringDocument>((current, patch) => current.applyPatch(patch), this);
   }
 
   public makePatch(other: StringDocument): CompressedPatch {
