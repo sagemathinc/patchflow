@@ -40,4 +40,4 @@ jobs:
         run: node --eval "if ('v' + require('./package.json').version !== process.env.RELEASE_TAG) process.exit(1)"
       - run: pnpm audit --audit-level high
       - run: pnpm check
-      - run: npm publish --access public --provenance
+      - run: npm publish --access public --provenance --loglevel verbose
