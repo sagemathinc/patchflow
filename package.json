@@ -1,6 +1,6 @@
 {
   "name": "patchflow",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": false,
   "description": "Lightweight patch-based directed acyclic graph realtime sync core",
   "license": "MIT",
@@ -28,7 +28,7 @@
     "dist/cjs/**/*",
     "dist/types/**/*",
     "README.md",
-    "LICENSE",
+    "LICENSE.txt",
     "package.json"
   ],
   "scripts": {
@@ -42,7 +42,8 @@
     "lint": "oxlint --deny-warnings src",
     "lint:fix": "oxlint --fix src",
     "format": "prettier --write .",
-    "check": "pnpm format && pnpm test && pnpm lint",
+    "format:check": "prettier --check .",
+    "check": "pnpm test && pnpm lint && pnpm build",
     "example:basic": "pnpm build && node dist/esm/examples/basic-session.js",
     "example:tcp:server": "pnpm build && node dist/esm/examples/tcp-session.js --role=server --file=/tmp/patchflow-a.txt",
     "example:tcp:client": "pnpm build && node dist/esm/examples/tcp-session.js --role=client --file=/tmp/patchflow-b.txt",
@@ -60,11 +61,11 @@
     "fast-deep-equal": "^3.1.3",
     "fast-json-stable-stringify": "^2.1.0",
     "immer": "^10.2.0",
-    "immutable": "^4.3.8",
-    "lru-cache": "^11.0.1",
-    "save-dev": "0.0.1-security"
+    "immutable": "^4.3.9",
+    "lru-cache": "^11.0.1"
   },
   "devDependencies": {
+    "@babel/core": "^7.29.1",
     "@rollup/plugin-commonjs": "^29.0.2",
     "@rollup/plugin-node-resolve": "^16.0.0",
     "@types/jest": "^29.5.12",
@@ -78,20 +79,7 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.4.0"
   },
-  "pnpm": {
-    "overrides": {
-      "ajv@>=6.0.0 <6.14.0": "^6.14.0",
-      "brace-expansion@>=1.0.0 <1.1.13": "^1.1.13",
-      "brace-expansion@>=2.0.0 <2.0.3": "^2.0.3",
-      "diff@>=4.0.0 <4.0.4": "^4.0.4",
-      "flatted@<3.4.2": "^3.4.2",
-      "handlebars@<4.7.9": "^4.7.9",
-      "minimatch@>=3.0.0 <3.1.4": "^3.1.4",
-      "minimatch@>=9.0.0 <9.0.7": "^9.0.7",
-      "picomatch@>=2.0.0 <2.3.2": "^2.3.2",
-      "picomatch@>=4.0.0 <4.0.4": "^4.0.4"
-    }
-  },
+  "packageManager": "pnpm@11.19.0",
   "ts-node": {
     "esm": {
       "resolveExtensions": [
