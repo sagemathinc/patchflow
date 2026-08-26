@@ -27,6 +27,11 @@ jobs:
           node-version: "24"
           package-manager-cache: false
       - run: npm install --global npm@11.19.0
+      - name: Verify OIDC environment
+        run: |
+          npm --version
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - name: Verify release tag
@@ -35,4 +40,4 @@ jobs:
         run: node --eval "if ('v' + require('./package.json').version !== process.env.RELEASE_TAG) process.exit(1)"
       - run: pnpm audit --audit-level high
       - run: pnpm check
-      - run: npm publish --access public
+      - run: npm publish --access public --provenance
