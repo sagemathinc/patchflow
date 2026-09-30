@@ -42,21 +42,18 @@ function diffUnits(a: string, b: string): Diff {
   while (suffix < minLength - prefix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) {
     suffix++;
   }
-  const midA = a.slice(prefix, a.length - suffix);
-  const midB = b.slice(prefix, b.length - suffix);
-  let middle: Diff;
-  if (midA.length * midB.length > MAX_DIFF_PRODUCT) {
-    middle = [];
-    if (midA) middle.push([-1, midA]);
-    if (midB) middle.push([1, midB]);
-  } else {
-    middle = dmp.diff_main(midA, midB, false) as Diff;
+  const middle = (a.length - prefix - suffix) * (b.length - prefix - suffix);
+  if (middle <= MAX_DIFF_PRODUCT) {
+    return dmp.diff_main(a, b, false) as Diff;
   }
-  const diffs: Diff = [];
-  if (prefix > 0) diffs.push([0, a.slice(0, prefix)]);
-  diffs.push(...middle.filter(([, text]) => text !== ""));
-  if (suffix > 0) diffs.push([0, a.slice(a.length - suffix)]);
-  return diffs;
+  const diffs: Diff = [
+    [0, a.slice(0, prefix)],
+    [-1, a.slice(prefix, a.length - suffix)],
+    [1, b.slice(prefix, b.length - suffix)],
+    [0, a.slice(a.length - suffix)],
+  ];
+  dmp.diff_cleanupMerge(diffs as any);
+  return diffs.filter(([, text]) => text !== "");
 }
 
 function lineDiff(base: string, target: string): Diff {

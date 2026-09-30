@@ -110,4 +110,9 @@ describe("mergeStrings3", () => {
     expect(outLines.length).toBe(n);
     expect(outLines[123]).toBe("line 123 left right");
   });
+
+  it("merges the incident case exactly: un-nest and delete on one line", () => {
+    // CoCalc incident 2026-09-28; a review fix briefly broke this.
+    expect(merge("- - tke1q nested\n", "- -  nested\n", "- tke1q nested\n")).toBe("-  nested\n");
+  });
 });
