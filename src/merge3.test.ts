@@ -250,4 +250,12 @@ describe("mergeStrings3", () => {
       ),
     ).toBe("notes\n1. one x8\n   - sub x9\n     | a | b |\n     | 1 | 2 |\n");
   });
+
+  it("keeps a line added after a line the other side changed to end with it", () => {
+    // Review of #8: "og" added after "cat" is not the end of "dog".
+    expect(merge("cat\n", "dog\n", "cat\nog\n")).toBe("dog\nog\n");
+    expect(merge("cat\n", "cat\nog\n", "dog\n")).toBe("dog\nog\n");
+    expect(merge("old\n", "changed\n", "old\ned\n")).toBe("changed\ned\n");
+    expect(merge("old\n", "old\ned\n", "changed\n")).toBe("changed\ned\n");
+  });
 });

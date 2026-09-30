@@ -659,10 +659,17 @@ function combineAdjacent(chunk: Chunk, words = false): string | undefined {
   }
   // One side added text the other side's change also added there (with the
   // same text both sides added, for example): keep it once.
-  if (bPre != null && a.endsWith(bPre)) return a;
-  if (bPost != null && a.startsWith(bPost)) return a;
-  if (aPre != null && b.endsWith(aPre)) return b;
-  if (aPost != null && b.startsWith(aPost)) return b;
+  // Only whole lines (or words) count: "og" added after "cat" is not part of
+  // "dog", which the other side changed "cat" to.
+  const boundary = (x: string) => (words ? /\s/.test(x) : x === "\n");
+  const endsWithAdded = (x: string, added: string) =>
+    x.endsWith(added) && (x.length === added.length || boundary(x[x.length - added.length - 1]));
+  const startsWithAdded = (x: string, added: string) =>
+    x.startsWith(added) && (x.length === added.length || boundary(added[added.length - 1]));
+  if (bPre != null && endsWithAdded(a, bPre)) return a;
+  if (bPost != null && startsWithAdded(a, bPost)) return a;
+  if (aPre != null && endsWithAdded(b, aPre)) return b;
+  if (aPost != null && startsWithAdded(b, aPost)) return b;
   if (bPre != null) return a + bPre;
   if (bPost != null) return bPost + a;
   if (aPre != null) return b + aPre;
