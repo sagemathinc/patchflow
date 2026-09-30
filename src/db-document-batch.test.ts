@@ -31,11 +31,7 @@ describe.each(backends)("%s DbDocument applyPatch sequence", ({ codec }) => {
     const doc2 = doc1.set({ id: 1, body: "hello world", count: 2 }) as any;
     const doc3 = doc2.delete({ id: 2 }) as any;
 
-    const patches = [
-      base.makePatch(doc1),
-      doc1.makePatch(doc2),
-      doc2.makePatch(doc3),
-    ];
+    const patches = [base.makePatch(doc1), doc1.makePatch(doc2), doc2.makePatch(doc3)];
 
     const finalDoc = applyPatches(base, patches);
     expect(finalDoc.isEqual(doc3)).toBe(true);

@@ -42,13 +42,13 @@ export class PatchGraph {
   // Exact per-patch values and merged values of patch sets, used when the codec
   // provides merge3 (see DocCodec.merge3).
   private exactCache: LRUCache<string, { doc: Document }>;
-  private exactMergeCache = new globalThis.Map<string, Document>();
+  private exactMergeCache: LRUCache<string, { doc: Document }>;
 
   constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
-    this.exactCache = new LRUCache<string, { doc: Document }>({
-      max: opts.exactCacheMaxEntries ?? DEFAULT_EXACT_CACHE_MAX_ENTRIES,
-    });
+    const exactMax = opts.exactCacheMaxEntries ?? DEFAULT_EXACT_CACHE_MAX_ENTRIES;
+    this.exactCache = new LRUCache<string, { doc: Document }>({ max: exactMax });
+    this.exactMergeCache = new LRUCache<string, { doc: Document }>({ max: exactMax });
     this.mergeStrategy = opts.mergeStrategy ?? "three-way";
     const maxSize = opts.valueCacheMaxSize ?? DEFAULT_VALUE_CACHE_MAX_SIZE;
     const maxEntries = opts.valueCacheMaxEntries ?? DEFAULT_VALUE_CACHE_MAX_ENTRIES;
@@ -137,7 +137,33 @@ export class PatchGraph {
     return settled.length > 0 ? settled.sort(comparePatchId) : heads;
   }
 
-  // Patches below a gap in the loaded history, with their descendants.
+  // Remove the changes of the excluded patches from `doc`, the exact value of
+  // `heads`, newest first: each is reverted like git revert, by a three-way
+  // merge of its own value (base), the current value and its parents' value.
+  // Excluded patches that are not ancestors of the heads change nothing.
+  private revertExact(doc: Document, heads: string[], without: Set<string>): Document | undefined {
+    const merge3 = this.codec.merge3!;
+    const reachable = this.ancestry(heads)?.times;
+    if (reachable == null) return undefined;
+    const excluded = Array.from(without)
+      .filter((t) => reachable.has(t))
+      .sort(comparePatchId)
+      .reverse();
+    for (const time of excluded) {
+      const patch = this.patches.get(time)!;
+      if (patch.isSnapshot || patch.patch == null) continue;
+      const after = this.exactValue(time);
+      const parents = patch.parents ?? [];
+      const before =
+        parents.length === 0 ? this.codec.fromString("") : this.exactValueOfSet(parents);
+      if (after == null || before == null) return undefined;
+      doc = merge3(after, doc, before);
+    }
+    return doc;
+  }
+
+  // Patches below a gap in the loaded history, with their descendants. A
+  // valid snapshot is self-contained, so waiting stops there.
   private waitingPatches(): Set<string> {
     let oldest: string | undefined;
     this.patches.forEach((_, time) => {
@@ -157,7 +183,8 @@ export class PatchGraph {
       if (waiting.has(time)) continue;
       waiting.add(time);
       for (const kid of this.children.get(time) ?? []) {
-        if (this.patches.has(kid)) stack.push(kid);
+        const patch = this.patches.get(kid);
+        if (patch != null && !(patch.isSnapshot && patch.snapshot != null)) stack.push(kid);
       }
     }
     return waiting;
@@ -290,21 +317,22 @@ export class PatchGraph {
     }
     const without = new Set<string>(opts.withoutTimes ?? []);
     const strategy = opts.mergeStrategy ?? this.mergeStrategy;
+    const exactPath = this.codec.merge3 != null && strategy !== "apply-all";
     const headTimes =
-      opts.time != null
-        ? [opts.time]
-        : this.codec.merge3 != null && without.size === 0 && strategy !== "apply-all"
-          ? this.getValueHeads()
-          : this.getHeads();
+      opts.time != null ? [opts.time] : exactPath ? this.getValueHeads() : this.getHeads();
     if (headTimes.length === 0) {
       return this.codec.fromString("");
     }
-    if (this.codec.merge3 != null && without.size === 0 && strategy !== "apply-all") {
+    if (exactPath) {
       // Exact values: every patch applies to the value of its own parents, and
-      // concurrent heads merge from their common ancestor. Falls back to
-      // applying all patches in time order when history needed for that is
-      // missing (e.g., below a snapshot, or a parent not yet received).
-      const exact = this.exactValueOfSet(headTimes);
+      // concurrent heads merge from their common ancestor. Excluded patches
+      // (undo) are reverted three-way from that value. Falls back to applying
+      // all patches in time order when history needed for that is missing
+      // (e.g., below a snapshot, or a parent not yet received).
+      let exact = this.exactValueOfSet(headTimes);
+      if (exact != null && without.size > 0) {
+        exact = this.revertExact(exact, headTimes, without);
+      }
       if (exact != null) return exact;
     }
     // Fast path: single head, no exclusions; reuse cached prefix if reachability unchanged.
@@ -500,7 +528,7 @@ export class PatchGraph {
     if (sorted.length === 1) return get(sorted[0]) ?? this.exactValue(sorted[0]);
     const key = sorted.join(",");
     const cached = this.exactMergeCache.get(key);
-    if (cached) return cached;
+    if (cached) return cached.doc;
     const merge3 = this.codec.merge3!;
     let acc = get(sorted[0]) ?? this.exactValue(sorted[0]);
     if (acc == null) return undefined;
@@ -513,7 +541,7 @@ export class PatchGraph {
       acc = merge3(merge.base, acc, value, merge.ancestors);
       accTimes = [...accTimes, t];
     }
-    this.exactMergeCache.set(key, acc);
+    this.exactMergeCache.set(key, { doc: acc });
     return acc;
   }
 

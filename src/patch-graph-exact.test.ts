@@ -1,4 +1,5 @@
 import { PatchGraph } from "./patch-graph";
+import { Session } from "./session";
 import { legacyPatchId } from "./patch-id";
 import { mergeStrings3 } from "./merge3";
 import { StringDocument } from "./string-document";
@@ -151,6 +152,80 @@ describe("PatchGraph exact values (codec with merge3)", () => {
     const exact = new PatchGraph({ codec: exactCodec });
     exact.add([patch(t1, [t0], "a\n", "a\nb\n"), patch(t2, [t1], "a\nb\n", "a\nb\nc\n")]);
     expect(exact.getValueHeads()).toEqual([t2]);
+  });
+
+  it("undoes a local edit exactly after an earlier concurrent merge", async () => {
+    // Review of #2: undo used to recompute all history with fuzzy replay.
+    const store = {
+      loadInitial: async () => ({ patches: [] }),
+      append: () => {},
+      subscribe: () => () => {},
+    };
+    const a = new Session({
+      codec: exactCodec,
+      patchStore: store,
+      clientId: "a",
+      clock: () => 100,
+    });
+    const b = new Session({
+      codec: exactCodec,
+      patchStore: store,
+      clientId: "b",
+      clock: () => 100,
+    });
+    await a.init();
+    await b.init();
+    const root = a.commit(doc("the cat sat\n"));
+    b.applyRemote(root);
+    const left = a.commit(doc("the dog sat\n"));
+    const right = b.commit(doc("the cow sat\n"));
+    a.applyRemote(right);
+    b.applyRemote(left);
+    const before = a.getDocument().toString();
+    expect(before).toBe("the cow dog sat\n");
+    a.commit(doc(before + "tail\n"));
+    expect(a.undo().toString()).toBe(before);
+    expect(a.redo().toString()).toBe(before + "tail\n");
+    a.close();
+    b.close();
+  });
+
+  it("does not let a partial backfill below a snapshot roll the value back", () => {
+    // Review of #2: waiting propagated through a self-contained snapshot.
+    const [r, p, q, s, t] = [1, 2, 3, 4, 5].map(legacyPatchId);
+    const g = new PatchGraph({ codec: exactCodec });
+    const text = "root\np\nq\nsnapshot\n";
+    g.add([
+      patch(r, [], "", "root\n"),
+      { time: s, parents: [q], isSnapshot: true, snapshot: text, userId: 0 } as Patch,
+      patch(t, [s], text, text + "after\n"),
+    ]);
+    expect(g.value().toString()).toBe(text + "after\n");
+    g.add([patch(q, [p], "root\np\n", "root\np\nq\n")]);
+    expect(g.value().toString()).toBe(text + "after\n");
+    expect(g.version(s).toString()).toBe(text);
+  });
+
+  it("bounds the cache of merged values", () => {
+    // Review of #2: merged values were cached without a bound.
+    const g = new PatchGraph({ codec: exactCodec, exactCacheMaxEntries: 2 });
+    let time = 0;
+    const add = (parents: string[], from: string, to: string) => {
+      const t = legacyPatchId(++time);
+      g.add([patch(t, parents, from, to)]);
+      return t;
+    };
+    let root = add([], "", "root\n");
+    let base = "root\n";
+    for (let i = 0; i < 100; i++) {
+      const a = add([root], base, base + `a${i}\n`);
+      const b = add([root], base, base + `b${i}\n`);
+      base = g.value().toString();
+      root = add([a, b], base, base);
+      g.value();
+    }
+    expect((g as any).exactMergeCache.size).toBeLessThanOrEqual(2);
+    expect(base.split("\n").length).toBe(202);
   });
 
   it("falls back when a parent below a patch is missing", () => {

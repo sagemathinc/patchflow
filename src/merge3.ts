@@ -21,12 +21,47 @@ import { DiffMatchPatch } from "@cocalc/diff-match-patch";
 
 type Diff = [number, string][];
 
+// Every replica must compute the same merge from the same patches, so no
+// result may depend on wall-clock time: diff-match-patch's deadline is
+// disabled, and work is bounded deterministically by diffUnits instead.
 const dmp = new DiffMatchPatch();
-dmp.diffTimeout = 0.2;
+dmp.diffTimeout = 0;
+
+// Above this many (base units x target units) in the part between the common
+// prefix and suffix, the middle is treated as one replacement instead of
+// being diffed (Myers diff is O((n + m) d) time).
+const MAX_DIFF_PRODUCT = 4_000_000;
+
+// Diff two strings of units (characters, or characters standing for lines or
+// words) deterministically.
+function diffUnits(a: string, b: string): Diff {
+  let prefix = 0;
+  const minLength = Math.min(a.length, b.length);
+  while (prefix < minLength && a[prefix] === b[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < minLength - prefix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) {
+    suffix++;
+  }
+  const midA = a.slice(prefix, a.length - suffix);
+  const midB = b.slice(prefix, b.length - suffix);
+  let middle: Diff;
+  if (midA.length * midB.length > MAX_DIFF_PRODUCT) {
+    middle = [];
+    if (midA) middle.push([-1, midA]);
+    if (midB) middle.push([1, midB]);
+  } else {
+    middle = dmp.diff_main(midA, midB, false) as Diff;
+  }
+  const diffs: Diff = [];
+  if (prefix > 0) diffs.push([0, a.slice(0, prefix)]);
+  diffs.push(...middle.filter(([, text]) => text !== ""));
+  if (suffix > 0) diffs.push([0, a.slice(a.length - suffix)]);
+  return diffs;
+}
 
 function lineDiff(base: string, target: string): Diff {
   const { chars1, chars2, lineArray } = dmp.diff_linesToChars(base, target);
-  const diffs = dmp.diff_main(chars1, chars2, false);
+  const diffs = diffUnits(chars1, chars2);
   dmp.diff_charsToLines(diffs, lineArray);
   return diffs as Diff;
 }
@@ -52,12 +87,12 @@ function wordDiff(base: string, target: string): Diff {
   const a = encode(base);
   const b = encode(target);
   if (tokens.length > 0xffff) return charDiff(base, target);
-  const diffs = dmp.diff_main(a, b, false) as Diff;
+  const diffs = diffUnits(a, b);
   return diffs.map(([op, ids]) => [op, Array.from(ids, (id) => tokens[id.charCodeAt(0)]).join("")]);
 }
 
 function charDiff(base: string, target: string): Diff {
-  return dmp.diff_main(base, target) as Diff;
+  return diffUnits(base, target);
 }
 
 interface Run {
@@ -294,9 +329,16 @@ function unionLines(x: string, y: string): string {
   if (x === y) return x;
   // Canonical order, so merging a into b and b into a agree.
   if (y < x) [x, y] = [y, x];
-  return lineDiff(x, y)
-    .map(([, text]) => text)
-    .join("");
+  return lineDiff(x, y).reduce((out, [, text]) => joinAdded(out, text, "\n"), "");
+}
+
+// Join two pieces of text added at one place, keeping a line (or word)
+// boundary between them, so the last line of one and the first of the other
+// (e.g. added at the end of a document without a final newline) never fuse.
+function joinAdded(x: string, y: string, separator: "\n" | " "): string {
+  if (x === "" || y === "") return x + y;
+  const boundary = separator === "\n" ? /\n$/.test(x) : /\s$/.test(x) || /^\s/.test(y);
+  return boundary ? x + y : x + separator + y;
 }
 
 function splitLines(text: string): string[] {
@@ -369,12 +411,12 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
   const n = inserted.length;
   const m = deleted.length;
   if (n === 0 || m === 0) return [];
-  const exactOnly = n * m > 40000;
+  if (n * m > MAX_ALIGN_PAIRS) return alignLinesGreedy(inserted, deleted);
   const weight = (x: number, y: number): number => {
     const line = deleted[y];
     const size = 1 + line.replace(/\s/g, "").length;
     if (inserted[x] === line) return size;
-    return !exactOnly && isEditOf(line, inserted[x]) ? size : 0;
+    return isEditOf(line, inserted[x]) ? size : 0;
   };
   const w: number[][] = [];
   for (let x = 0; x < n; x++) {
@@ -451,6 +493,30 @@ function mergeLineStates(base: string, x: LineState, y: LineState): string {
   return diff3(base, x.text, y.text, wordDiff, mergeWords);
 }
 
+// Above this many (inserted x deleted) line pairs, alignLines does not build
+// its quadratic tables but pairs greedily with a bounded look-ahead.
+const MAX_ALIGN_PAIRS = 40_000;
+const ALIGN_LOOKAHEAD = 16;
+
+// Linear-time in-order pairing for large blocks: each inserted line pairs
+// with the first of the next few unpaired deleted lines that it equals or
+// edits.
+function alignLinesGreedy(inserted: string[], deleted: string[]): [number, number][] {
+  const pairs: [number, number][] = [];
+  let y = 0;
+  for (let x = 0; x < inserted.length && y < deleted.length; x++) {
+    const end = Math.min(deleted.length, y + ALIGN_LOOKAHEAD);
+    for (let k = y; k < end; k++) {
+      if (inserted[x] === deleted[k] || isEditOf(deleted[k], inserted[x])) {
+        pairs.push([x, k]);
+        y = k + 1;
+        break;
+      }
+    }
+  }
+  return pairs;
+}
+
 // Whether `text` is an edit of the line `base` rather than a different line: it
 // keeps at least a third of base's (non-whitespace) text.
 function isEditOf(base: string, text: string): boolean {
@@ -483,9 +549,18 @@ function combineAdjacent(chunk: Chunk, words = false): string | undefined {
   const aPost = post(a);
   const bPre = pre(b);
   const bPost = post(b);
-  const both = (x: string, y: string) => (x <= y ? x + y : y + x);
-  if (aPre != null && bPre != null) return base + both(aPre, bPre);
-  if (aPost != null && bPost != null) return both(aPost, bPost) + base;
+  // Text added by both sides at one place is joined with a boundary: a line
+  // break where the additions are whole lines, otherwise a space.
+  const both = (x: string, y: string, lines: boolean) => {
+    const separator = lines ? "\n" : " ";
+    return x <= y ? joinAdded(x, y, separator) : joinAdded(y, x, separator);
+  };
+  if (aPre != null && bPre != null) {
+    return base + both(aPre, bPre, !words && base.endsWith("\n"));
+  }
+  if (aPost != null && bPost != null) {
+    return both(aPost, bPost, !words && aPost.endsWith("\n") && bPost.endsWith("\n")) + base;
+  }
   if (bPre != null) return a + bPre;
   if (bPost != null) return bPost + a;
   if (aPre != null) return b + aPre;
@@ -525,7 +600,9 @@ function mergeWords(words: Chunk): string {
 }
 
 function resolveTrivial(chunk: Chunk): string | undefined {
-  if (chunk.base === "") return chunk.a <= chunk.b ? chunk.a + chunk.b : chunk.b + chunk.a;
+  if (chunk.base === "") {
+    return chunk.a <= chunk.b ? joinAdded(chunk.a, chunk.b, " ") : joinAdded(chunk.b, chunk.a, " ");
+  }
   if (sameIgnoringWhitespace(chunk.base, chunk.a)) return chunk.b;
   if (sameIgnoringWhitespace(chunk.base, chunk.b)) return chunk.a;
   return preferEdit(chunk);

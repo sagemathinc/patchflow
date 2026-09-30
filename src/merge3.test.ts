@@ -77,4 +77,37 @@ describe("mergeStrings3", () => {
     expect(out).toContain("> quoted");
     expect(out).toContain("new thirteen");
   });
+
+  it("does not depend on wall-clock time", () => {
+    // Review of #2: a diff deadline made replicas disagree when slow.
+    const input = { base: "a\nb\nc\nd\ne\nf\n", a: "a\nB\nc\nd\nE\nf\n", b: "a\nb\nC\nd\ne\nF\n" };
+    const normal = mergeStrings3(input);
+    const now = Date.now;
+    let tick = 0;
+    let slow: string;
+    try {
+      Date.now = () => (tick += 1000);
+      slow = mergeStrings3(input);
+    } finally {
+      Date.now = now;
+    }
+    expect(normal).toBe("a\nB\nC\nd\nE\nF\n");
+    expect(slow).toBe(normal);
+  });
+
+  it("never fuses lines added at the end without a final newline", () => {
+    expect(merge("header\n", "header\nalpha", "header\nbeta")).toBe("header\nalpha\nbeta");
+    expect(merge("", "alpha", "beta")).toBe("alpha\nbeta");
+    expect(merge("x", "x alpha", "x beta")).toBe("x alpha beta");
+  });
+
+  it("merges concurrent rewrites of a large block in bounded work", () => {
+    const n = 2000;
+    const lines = (word: string) =>
+      Array.from({ length: n }, (_, i) => `line ${i} ${word}\n`).join("");
+    const out = merge(lines("original"), lines("left"), lines("right"));
+    const outLines = out.split("\n").filter((line) => line !== "");
+    expect(outLines.length).toBe(n);
+    expect(outLines[123]).toBe("line 123 left right");
+  });
 });
