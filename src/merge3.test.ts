@@ -115,4 +115,37 @@ describe("mergeStrings3", () => {
     // CoCalc incident 2026-09-28; a review fix briefly broke this.
     expect(merge("- - tke1q nested\n", "- -  nested\n", "- tke1q nested\n")).toBe("-  nested\n");
   });
+
+  it("aligns a last line without a final newline like any other line", () => {
+    // Found by CoCalc's notebook fuzzer: both sides edited the unterminated
+    // last line and one also added lines before it; they were joined to it.
+    const base = "import math\nnew line x4";
+    const a = "import math\nadded one\nadded two\nnew mine line x4";
+    const b = "import math\nnew x4 theirs";
+    const out = merge(base, a, b);
+    expect(out.split("\n")).toEqual([
+      "import math",
+      "added one",
+      "added two",
+      "new mine x4 theirs",
+    ]);
+    expect(merge("a\nb", "a\nb\n", "a\nB")).toBe("a\nB\n");
+    expect(merge("a\nb\n", "a\nb", "a\nB\n")).toBe("a\nB");
+  });
+
+  it("pairs a changed line with the closest of several edits of it", () => {
+    // CoCalc notebook fuzzer: side a added lines that all resemble the line it
+    // edited; they paired with the first of them, keeping both versions.
+    const base = "head x0\nnew line t4\n";
+    const a = "head x0\nnew b20 line b16\nnew line b21\nnew b13 line t4\n";
+    const b = "head x0\nnew t4 t19\n";
+    expect(merge(base, a, b).split("t4").length - 1).toBe(1);
+  });
+
+  it("merges a line one side trimmed and the other extended", () => {
+    // CoCalc notebook fuzzer: the diff matched a space instead of a word, so
+    // the trimmed line was not seen as an edit and both versions were kept.
+    expect(merge("aa bb cc dd\n", "aa bb cc dd B\n", "aa dd A\n")).toBe("aa dd A B\n");
+    expect(merge("z = 0 q\n", "z = 0 q B\n", "z q A\n")).toBe("z q A B\n");
+  });
 });

@@ -409,11 +409,12 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
   const m = deleted.length;
   if (n === 0 || m === 0) return [];
   if (n * m > MAX_ALIGN_PAIRS) return alignLinesGreedy(inserted, deleted);
+  // An edit is weighted by how much of the line it keeps, so among several
+  // edits of one line the closest wins; the same line outweighs any edit.
   const weight = (x: number, y: number): number => {
     const line = deleted[y];
-    const size = 1 + line.replace(/\s/g, "").length;
-    if (inserted[x] === line) return size;
-    return isEditOf(line, inserted[x]) ? size : 0;
+    if (inserted[x] === line) return 2 + line.replace(/\s/g, "").length;
+    return isEditOf(line, inserted[x]) ? 1 + keptOf(line, inserted[x]) : 0;
   };
   const w: number[][] = [];
   for (let x = 0; x < n; x++) {
@@ -517,12 +518,34 @@ function alignLinesGreedy(inserted: string[], deleted: string[]): [number, numbe
 // Whether `text` is an edit of the line `base` rather than a different line: it
 // keeps at least a third of base's (non-whitespace) text.
 function isEditOf(base: string, text: string): boolean {
-  const size = (s: string) => s.replace(/\s/g, "").length;
-  const total = size(base);
+  const total = base.replace(/\s/g, "").length;
   if (total === 0) return false;
-  let kept = 0;
-  for (const [op, run] of wordDiff(base, text)) if (op === 0) kept += size(run);
-  return kept * 3 >= total;
+  return keptOf(base, text) * 3 >= total;
+}
+
+// How much (non-whitespace) text of the line `base` the line `text` keeps:
+// the length of the longest common sequence of their words, ignoring
+// whitespace (a diff of words and spaces can match a space instead of a word).
+function keptOf(base: string, text: string): number {
+  const words = (s: string) => s.match(/[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) ?? [];
+  const x = words(base);
+  const y = words(text);
+  if (x.length * y.length > 40_000) {
+    let kept = 0;
+    for (const [op, run] of wordDiff(base, text)) {
+      if (op === 0) kept += run.replace(/\s/g, "").length;
+    }
+    return kept;
+  }
+  let prev = Array.from({ length: y.length + 1 }, () => 0);
+  for (let i = x.length - 1; i >= 0; i--) {
+    const row = Array.from({ length: y.length + 1 }, () => 0);
+    for (let j = y.length - 1; j >= 0; j--) {
+      row[j] = x[i] === y[j] ? prev[j + 1] + x[i].length : Math.max(prev[j], row[j + 1]);
+    }
+    prev = row;
+  }
+  return prev[0];
 }
 
 // A conflicting chunk where one side only added text before or after the base
@@ -611,6 +634,32 @@ export function mergeStrings3(opts: {
   b: string;
   // Values of the common ancestors when `base` is itself a merge of several
   // (criss-cross history); see DocCodec.merge3.
+  ancestors?: string[];
+}): string {
+  const { base, a, b, ancestors } = opts;
+  if (a === b) return a;
+  if (base === a) return b;
+  if (base === b) return a;
+  // Merge with every text ending in a newline, so a last line without one is
+  // aligned like any other line (otherwise lines added after it by one side
+  // could be joined to it), then restore the final newline: kept or removed
+  // as the side that changed it did.
+  const terminated = (text: string) => (text === "" || text.endsWith("\n") ? text : `${text}\n`);
+  const merged = mergeTerminated({
+    base: terminated(base),
+    a: terminated(a),
+    b: terminated(b),
+    ancestors: ancestors?.map(terminated),
+  });
+  const [f0, fa, fb] = [base, a, b].map((text) => text.endsWith("\n"));
+  const finalNewline = fa === fb ? fa : fa !== f0 ? fa : fb;
+  return !finalNewline && merged.endsWith("\n") ? merged.slice(0, -1) : merged;
+}
+
+function mergeTerminated(opts: {
+  base: string;
+  a: string;
+  b: string;
   ancestors?: string[];
 }): string {
   const { base, a, b, ancestors } = opts;
