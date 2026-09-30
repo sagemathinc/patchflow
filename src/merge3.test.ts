@@ -148,4 +148,21 @@ describe("mergeStrings3", () => {
     expect(merge("aa bb cc dd\n", "aa bb cc dd B\n", "aa dd A\n")).toBe("aa dd A B\n");
     expect(merge("z = 0 q\n", "z = 0 q B\n", "z q A\n")).toBe("z q A B\n");
   });
+
+  it("merges concurrent rewrites of many long lines in bounded work", () => {
+    // Review of #4: pairing lines by a word-level LCS was quadratic in words
+    // inside the quadratic line alignment (80 lines of 100 words: 15 s).
+    const words = Array.from({ length: 100 }, (_, i) => `word${i}`).join(" ");
+    const base = Array.from({ length: 80 }, (_, i) => `${i} ${words} original\n`).join("");
+    const start = Date.now();
+    const out = merge(
+      base,
+      base.split("original").join("left"),
+      base.split("original").join("right"),
+    );
+    expect(Date.now() - start).toBeLessThan(5000);
+    const lines = out.split("\n").filter((line) => line !== "");
+    expect(lines.length).toBe(80);
+    expect(lines[7]).toBe(`7 ${words} left right`);
+  });
 });

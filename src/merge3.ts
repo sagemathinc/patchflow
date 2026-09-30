@@ -409,12 +409,20 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
   const m = deleted.length;
   if (n === 0 || m === 0) return [];
   if (n * m > MAX_ALIGN_PAIRS) return alignLinesGreedy(inserted, deleted);
+  const ins = inserted.map(wordProfile);
+  const del = deleted.map(wordProfile);
+  // Scoring every pair costs about m * (words inserted) + n * (words deleted);
+  // above a fixed bound use the bounded greedy pairing instead.
+  const words = (profiles: WordProfile[]) => profiles.reduce((sum, p) => sum + p.counts.size, 0);
+  if (m * words(ins) + n * words(del) > MAX_ALIGN_WORD_WORK) {
+    return alignLinesGreedy(inserted, deleted);
+  }
   // An edit is weighted by how much of the line it keeps, so among several
   // edits of one line the closest wins; the same line outweighs any edit.
   const weight = (x: number, y: number): number => {
-    const line = deleted[y];
-    if (inserted[x] === line) return 2 + line.replace(/\s/g, "").length;
-    return isEditOf(line, inserted[x]) ? 1 + keptOf(line, inserted[x]) : 0;
+    if (inserted[x] === deleted[y]) return 2 + del[y].total;
+    const kept = editScore(del[y], ins[x]);
+    return kept > 0 ? 1 + kept : 0;
   };
   const w: number[][] = [];
   for (let x = 0; x < n; x++) {
@@ -494,6 +502,7 @@ function mergeLineStates(base: string, x: LineState, y: LineState): string {
 // Above this many (inserted x deleted) line pairs, alignLines does not build
 // its quadratic tables but pairs greedily with a bounded look-ahead.
 const MAX_ALIGN_PAIRS = 40_000;
+const MAX_ALIGN_WORD_WORK = 4_000_000;
 const ALIGN_LOOKAHEAD = 16;
 
 // Linear-time in-order pairing for large blocks: each inserted line pairs
@@ -501,11 +510,14 @@ const ALIGN_LOOKAHEAD = 16;
 // edits.
 function alignLinesGreedy(inserted: string[], deleted: string[]): [number, number][] {
   const pairs: [number, number][] = [];
+  const del: (WordProfile | undefined)[] = [];
+  const profile = (k: number) => (del[k] ??= wordProfile(deleted[k]));
   let y = 0;
   for (let x = 0; x < inserted.length && y < deleted.length; x++) {
     const end = Math.min(deleted.length, y + ALIGN_LOOKAHEAD);
+    const ins = wordProfile(inserted[x]);
     for (let k = y; k < end; k++) {
-      if (inserted[x] === deleted[k] || isEditOf(deleted[k], inserted[x])) {
+      if (inserted[x] === deleted[k] || editScore(profile(k), ins) > 0) {
         pairs.push([x, k]);
         y = k + 1;
         break;
@@ -515,37 +527,43 @@ function alignLinesGreedy(inserted: string[], deleted: string[]): [number, numbe
   return pairs;
 }
 
-// Whether `text` is an edit of the line `base` rather than a different line: it
-// keeps at least a third of base's (non-whitespace) text.
-function isEditOf(base: string, text: string): boolean {
-  const total = base.replace(/\s/g, "").length;
-  if (total === 0) return false;
-  return keptOf(base, text) * 3 >= total;
+// How much of the line `base` the line `text` keeps if `text` is an edit of it
+// rather than a different line (it keeps at least a third of base's
+// non-whitespace text), otherwise 0.
+function editScore(base: WordProfile, text: WordProfile): number {
+  if (base.total === 0) return 0;
+  const kept = keptOf(base, text);
+  return kept * 3 >= base.total ? kept : 0;
+}
+
+// The words (and punctuation) of a line, counted, with their total length.
+interface WordProfile {
+  counts: Map<string, number>;
+  total: number;
+}
+
+function wordProfile(line: string): WordProfile {
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const word of line.match(/[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) ?? []) {
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+    total += word.length;
+  }
+  return { counts, total };
 }
 
 // How much (non-whitespace) text of the line `base` the line `text` keeps:
-// the length of the longest common sequence of their words, ignoring
-// whitespace (a diff of words and spaces can match a space instead of a word).
-function keptOf(base: string, text: string): number {
-  const words = (s: string) => s.match(/[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) ?? [];
-  const x = words(base);
-  const y = words(text);
-  if (x.length * y.length > 40_000) {
-    let kept = 0;
-    for (const [op, run] of wordDiff(base, text)) {
-      if (op === 0) kept += run.replace(/\s/g, "").length;
-    }
-    return kept;
+// the length of the words they share (as a multiset, ignoring order and
+// whitespace). Linear in the lines' lengths; a similarity score for pairing a
+// changed line with the line it edits, not an alignment.
+function keptOf(base: WordProfile, text: WordProfile): number {
+  let kept = 0;
+  const [small, large] = base.counts.size <= text.counts.size ? [base, text] : [text, base];
+  for (const [word, count] of small.counts) {
+    const other = large.counts.get(word);
+    if (other != null) kept += Math.min(count, other) * word.length;
   }
-  let prev = Array.from({ length: y.length + 1 }, () => 0);
-  for (let i = x.length - 1; i >= 0; i--) {
-    const row = Array.from({ length: y.length + 1 }, () => 0);
-    for (let j = y.length - 1; j >= 0; j--) {
-      row[j] = x[i] === y[j] ? prev[j + 1] + x[i].length : Math.max(prev[j], row[j + 1]);
-    }
-    prev = row;
-  }
-  return prev[0];
+  return kept;
 }
 
 // A conflicting chunk where one side only added text before or after the base
