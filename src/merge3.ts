@@ -381,7 +381,9 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
     w.push([]);
     for (let y = 0; y < m; y++) w[x].push(weight(x, y));
   }
-  const best: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  const best: number[][] = Array.from({ length: n + 1 }, () =>
+    Array.from({ length: m + 1 }, () => 0),
+  );
   for (let x = n - 1; x >= 0; x--) {
     for (let y = m - 1; y >= 0; y--) {
       const pair = w[x][y] > 0 ? w[x][y] + best[x + 1][y + 1] : 0;
