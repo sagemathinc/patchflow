@@ -173,4 +173,69 @@ describe("mergeStrings3", () => {
       "b17 the x2 a10 a15 a16",
     );
   });
+
+  it("merges a line one side split with edits the other made elsewhere in it", () => {
+    // CoCalc collaborative meeting notes in a browser: one person pressed
+    // Enter in the middle of a heading while another typed at its end. Line by
+    // line, both the edited heading and the split-off tail were kept, so the
+    // tail's words appeared twice.
+    expect(
+      merge(
+        "# Notes\n\n## Discussion w1 w2 w3 tk\n\n## Action items\n",
+        "# Notes\n\n## Discussion w1\n\nnew\n\n## w2 w3 tk\n\n## Action items\n",
+        "# Notes\n\n## Discussion w1 w2 w3 tk4\n\nmore\n\n## Action items\n",
+      ),
+    ).toBe("# Notes\n\n## Discussion w1\n\nnew\n\n## w2 w3 tk4\n\nmore\n\n## Action items\n");
+  });
+
+  it("keeps changes to neighboring words of one line", () => {
+    // With no unchanged word between them, the two edits form one chunk; both
+    // versions of both words used to be kept.
+    expect(merge("the quick brown fox\n", "the QUICK brown fox\n", "the quick BROWN fox\n")).toBe(
+      "the QUICK BROWN fox\n",
+    );
+    expect(merge("x aaDisc bbDisc y", "x aaDisc bb cDisc y", "x aa dDisc bbDisc y")).toBe(
+      "x aa dDisc bb cDisc y",
+    );
+  });
+
+  it("merges random concurrent word and line edits symmetrically, keeping each new word once", () => {
+    let seed = 1;
+    const rnd = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      return seed % n;
+    };
+    let token = 0;
+    // Insert words, type onto a word, split a line, delete a word, add a line.
+    const edit = (words: string[], side: string): string[] => {
+      const w = [...words];
+      for (let k = 1 + rnd(3); k > 0; k--) {
+        const i = rnd(w.length + 1);
+        const r = rnd(5);
+        const t = `${side}${token++}`;
+        if (r === 0) w.splice(i, 0, t);
+        else if (r === 1 && i < w.length) w[i] += t;
+        else if (r === 2 && i < w.length) w.splice(i, 0, "\n");
+        else if (r === 3 && i < w.length && w[i] !== "\n") w.splice(i, 1);
+        else w.splice(i, 0, t, "\n");
+      }
+      return w;
+    };
+    const text = (w: string[]) => w.join(" ").replace(/ ?\n ?/g, "\n") + "\n";
+    const tokens = (s: string) => s.match(/[ab]\d+/g) ?? [];
+    const problems: string[] = [];
+    for (let run = 0; run < 2000; run++) {
+      const words = Array.from({ length: 3 + rnd(10) }, (_, i) => (rnd(5) === 0 ? "\n" : `w${i}`));
+      const [base, a, b] = [words, edit(words, "a"), edit(words, "b")].map(text);
+      const merged = merge(base, a, b);
+      if (merge(base, b, a) !== merged)
+        problems.push(`asymmetric: ${JSON.stringify({ base, a, b })}`);
+      const all = tokens(merged);
+      for (const t of new Set([...tokens(a), ...tokens(b)])) {
+        const n = all.filter((x) => x === t).length;
+        if (n !== 1) problems.push(`${t} ${n} times: ${JSON.stringify({ base, a, b, merged })}`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
 });

@@ -499,6 +499,20 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
   return pairs;
 }
 
+// A region both sides changed, merged word by word if their changes touch
+// different words (for example, one side split a line and the other edited
+// words elsewhere in it), otherwise undefined. Line by line, the split line
+// and the edited line would both be kept, duplicating its text.
+function cleanWordMerge(chunk: Chunk): string | undefined {
+  let clean = true;
+  const merged = diff3(chunk.base, chunk.a, chunk.b, wordDiff, (words) => {
+    const disjoint = disjointWordEdits(words);
+    if (disjoint == null) clean = false;
+    return disjoint ?? words.a;
+  });
+  return clean ? merged : undefined;
+}
+
 // Line-level three-way merge of a region both sides changed. Per base line:
 // kept by both stays; changed by one side takes that change; modified by both
 // is merged word by word; a modification beats a concurrent deletion. Lines
@@ -678,7 +692,66 @@ function keepBoth(chunk: Chunk): string {
 // Both sides changed the same words: keep both versions rather than splicing
 // characters of two different edits into a word neither of them typed.
 function mergeWords(words: Chunk): string {
-  return combineAdjacent(words, true) ?? resolveTrivial(words) ?? keepBoth(words);
+  return (
+    combineAdjacent(words, true) ??
+    resolveTrivial(words) ??
+    disjointWordEdits(words) ??
+    keepBoth(words)
+  );
+}
+
+// Both sides changed words of a chunk, but different ones (for example,
+// neighboring words, with no unchanged word between them to split the chunk):
+// apply both sides' edits. Undefined if edits of the two sides overlap
+// (except the same edit made on both sides). Text both sides inserted at one
+// place is kept in a canonical order, and an insertion just before or after
+// the other side's edit is placed there.
+function disjointWordEdits(chunk: Chunk): string | undefined {
+  const { base } = chunk;
+  const edits = (text: string) => diffToEdits(wordDiff(base, text)).map((e) => trimEdit(base, e));
+  const aEdits = edits(chunk.a);
+  const bEdits: Edit[] = [];
+  for (const e of edits(chunk.b)) {
+    const same = (x: Edit) => x.from === e.from && x.to === e.to && x.insert === e.insert;
+    if (aEdits.some(same)) continue;
+    const both = isInsertion(e) ? aEdits.findIndex((x) => isInsertion(x) && x.from === e.from) : -1;
+    if (both !== -1) {
+      const x = aEdits[both].insert;
+      const insert = x <= e.insert ? joinAdded(x, e.insert, " ") : joinAdded(e.insert, x, " ");
+      aEdits[both] = { ...e, insert };
+      continue;
+    }
+    const clash = (x: Edit) => {
+      if (isInsertion(x)) return e.from < x.from && x.from < e.to;
+      if (isInsertion(e)) return x.from < e.from && e.from < x.to;
+      return x.from < e.to && e.from < x.to;
+    };
+    if (aEdits.some(clash)) return undefined;
+    bEdits.push(e);
+  }
+  const all = [...aEdits, ...bEdits].sort((x, y) => x.from - y.from || x.to - y.to);
+  return applyEdits(base, all);
+}
+
+// An edit without the whitespace it keeps at its start and end (a replaced
+// word includes the space before it), so it does not overlap a whitespace
+// change next to it, such as a line break the other side typed there.
+function trimEdit(base: string, e: Edit): Edit {
+  let { from, to, insert } = e;
+  while (from < to && insert !== "" && base[from] === insert[0] && /\s/.test(insert[0])) {
+    from++;
+    insert = insert.slice(1);
+  }
+  while (
+    from < to &&
+    insert !== "" &&
+    base[to - 1] === insert[insert.length - 1] &&
+    /\s/.test(base[to - 1])
+  ) {
+    to--;
+    insert = insert.slice(0, -1);
+  }
+  return { from, to, insert };
 }
 
 function resolveTrivial(chunk: Chunk): string | undefined {
@@ -733,7 +806,9 @@ function mergeTerminated(opts: {
     a,
     b,
     lineDiff,
-    withAdjacent((lines) => editUnion(lines, lineDiff, (region) => lineUnion(region))),
+    withAdjacent((lines) =>
+      editUnion(lines, lineDiff, (region) => cleanWordMerge(region) ?? lineUnion(region)),
+    ),
     (text) => text.trim() !== "",
   );
   return ancestors?.length ? dropReappearedLines(merged, [base, ...ancestors], a, b) : merged;
