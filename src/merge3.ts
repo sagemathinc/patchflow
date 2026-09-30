@@ -63,29 +63,73 @@ function lineDiff(base: string, target: string): Diff {
   return diffs as Diff;
 }
 
-// Diff by whole words, runs of whitespace and single punctuation characters,
-// so a changed word is always a chunk of its own.
+// Diff by whole words (and single punctuation characters), aligned by the
+// words alone: the text is split into units of a word and the whitespace
+// before it, the sequence of words is diffed, and a matched word whose
+// preceding whitespace changed becomes a small whitespace change before an
+// unchanged word. So a changed word is always a chunk of its own, a diff
+// never matches a space instead of a word, and a whitespace change does not
+// hide a matching word.
 function wordDiff(base: string, target: string): Diff {
-  const tokenize = (text: string) => text.match(/\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) ?? [];
+  const units = (text: string) => {
+    const out: { space: string; word: string }[] = [];
+    const re = /(\s*)([\p{L}\p{N}_]+|[^\s\p{L}\p{N}_])/gu;
+    let end = 0;
+    for (let m = re.exec(text); m != null; m = re.exec(text)) {
+      out.push({ space: m[1], word: m[2] });
+      end = re.lastIndex;
+    }
+    if (end < text.length) out.push({ space: text.slice(end), word: "" });
+    return out;
+  };
+  const a = units(base);
+  const b = units(target);
   const ids = new Map<string, string>();
-  const tokens: string[] = [];
-  const encode = (text: string) =>
-    tokenize(text)
-      .map((token) => {
-        let id = ids.get(token);
+  const encode = (list: { word: string }[]) =>
+    list
+      .map(({ word }) => {
+        let id = ids.get(word);
         if (id === undefined) {
-          id = String.fromCharCode(tokens.length);
-          ids.set(token, id);
-          tokens.push(token);
+          id = String.fromCharCode(ids.size);
+          ids.set(word, id);
         }
         return id;
       })
       .join("");
-  const a = encode(base);
-  const b = encode(target);
-  if (tokens.length > 0xffff) return charDiff(base, target);
-  const diffs = diffUnits(a, b);
-  return diffs.map(([op, ids]) => [op, Array.from(ids, (id) => tokens[id.charCodeAt(0)]).join("")]);
+  const x = encode(a);
+  const y = encode(b);
+  if (ids.size > 0xffff) return charDiff(base, target);
+  const out: Diff = [];
+  const push = (op: number, text: string) => {
+    if (text === "") return;
+    const last = out[out.length - 1];
+    if (last != null && last[0] === op) last[1] += text;
+    else out.push([op, text]);
+  };
+  let i = 0;
+  let j = 0;
+  for (const [op, run] of diffUnits(x, y)) {
+    for (let k = 0; k < run.length; k++) {
+      if (op === 0) {
+        const u = a[i++];
+        const v = b[j++];
+        if (u.space === v.space) {
+          push(0, u.space + u.word);
+        } else {
+          push(-1, u.space);
+          push(1, v.space);
+          push(0, u.word);
+        }
+      } else if (op === -1) {
+        const u = a[i++];
+        push(-1, u.space + u.word);
+      } else {
+        const v = b[j++];
+        push(1, v.space + v.word);
+      }
+    }
+  }
+  return out;
 }
 
 function charDiff(base: string, target: string): Diff {
@@ -409,11 +453,20 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
   const m = deleted.length;
   if (n === 0 || m === 0) return [];
   if (n * m > MAX_ALIGN_PAIRS) return alignLinesGreedy(inserted, deleted);
+  const ins = inserted.map(wordProfile);
+  const del = deleted.map(wordProfile);
+  // Scoring every pair costs about m * (words inserted) + n * (words deleted);
+  // above a fixed bound use the bounded greedy pairing instead.
+  const words = (profiles: WordProfile[]) => profiles.reduce((sum, p) => sum + p.counts.size, 0);
+  if (m * words(ins) + n * words(del) > MAX_ALIGN_WORD_WORK) {
+    return alignLinesGreedy(inserted, deleted);
+  }
+  // An edit is weighted by how much of the line it keeps, so among several
+  // edits of one line the closest wins; the same line outweighs any edit.
   const weight = (x: number, y: number): number => {
-    const line = deleted[y];
-    const size = 1 + line.replace(/\s/g, "").length;
-    if (inserted[x] === line) return size;
-    return isEditOf(line, inserted[x]) ? size : 0;
+    if (inserted[x] === deleted[y]) return 2 + del[y].total;
+    const kept = editScore(del[y], ins[x]);
+    return kept > 0 ? 1 + kept : 0;
   };
   const w: number[][] = [];
   for (let x = 0; x < n; x++) {
@@ -493,6 +546,7 @@ function mergeLineStates(base: string, x: LineState, y: LineState): string {
 // Above this many (inserted x deleted) line pairs, alignLines does not build
 // its quadratic tables but pairs greedily with a bounded look-ahead.
 const MAX_ALIGN_PAIRS = 40_000;
+const MAX_ALIGN_WORD_WORK = 4_000_000;
 const ALIGN_LOOKAHEAD = 16;
 
 // Linear-time in-order pairing for large blocks: each inserted line pairs
@@ -500,11 +554,14 @@ const ALIGN_LOOKAHEAD = 16;
 // edits.
 function alignLinesGreedy(inserted: string[], deleted: string[]): [number, number][] {
   const pairs: [number, number][] = [];
+  const del: (WordProfile | undefined)[] = [];
+  const profile = (k: number) => (del[k] ??= wordProfile(deleted[k]));
   let y = 0;
   for (let x = 0; x < inserted.length && y < deleted.length; x++) {
     const end = Math.min(deleted.length, y + ALIGN_LOOKAHEAD);
+    const ins = wordProfile(inserted[x]);
     for (let k = y; k < end; k++) {
-      if (inserted[x] === deleted[k] || isEditOf(deleted[k], inserted[x])) {
+      if (inserted[x] === deleted[k] || editScore(profile(k), ins) > 0) {
         pairs.push([x, k]);
         y = k + 1;
         break;
@@ -514,15 +571,43 @@ function alignLinesGreedy(inserted: string[], deleted: string[]): [number, numbe
   return pairs;
 }
 
-// Whether `text` is an edit of the line `base` rather than a different line: it
-// keeps at least a third of base's (non-whitespace) text.
-function isEditOf(base: string, text: string): boolean {
-  const size = (s: string) => s.replace(/\s/g, "").length;
-  const total = size(base);
-  if (total === 0) return false;
+// How much of the line `base` the line `text` keeps if `text` is an edit of it
+// rather than a different line (it keeps at least a third of base's
+// non-whitespace text), otherwise 0.
+function editScore(base: WordProfile, text: WordProfile): number {
+  if (base.total === 0) return 0;
+  const kept = keptOf(base, text);
+  return kept * 3 >= base.total ? kept : 0;
+}
+
+// The words (and punctuation) of a line, counted, with their total length.
+interface WordProfile {
+  counts: Map<string, number>;
+  total: number;
+}
+
+function wordProfile(line: string): WordProfile {
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const word of line.match(/[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) ?? []) {
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+    total += word.length;
+  }
+  return { counts, total };
+}
+
+// How much (non-whitespace) text of the line `base` the line `text` keeps:
+// the length of the words they share (as a multiset, ignoring order and
+// whitespace). Linear in the lines' lengths; a similarity score for pairing a
+// changed line with the line it edits, not an alignment.
+function keptOf(base: WordProfile, text: WordProfile): number {
   let kept = 0;
-  for (const [op, run] of wordDiff(base, text)) if (op === 0) kept += size(run);
-  return kept * 3 >= total;
+  const [small, large] = base.counts.size <= text.counts.size ? [base, text] : [text, base];
+  for (const [word, count] of small.counts) {
+    const other = large.counts.get(word);
+    if (other != null) kept += Math.min(count, other) * word.length;
+  }
+  return kept;
 }
 
 // A conflicting chunk where one side only added text before or after the base
@@ -611,6 +696,32 @@ export function mergeStrings3(opts: {
   b: string;
   // Values of the common ancestors when `base` is itself a merge of several
   // (criss-cross history); see DocCodec.merge3.
+  ancestors?: string[];
+}): string {
+  const { base, a, b, ancestors } = opts;
+  if (a === b) return a;
+  if (base === a) return b;
+  if (base === b) return a;
+  // Merge with every text ending in a newline, so a last line without one is
+  // aligned like any other line (otherwise lines added after it by one side
+  // could be joined to it), then restore the final newline: kept or removed
+  // as the side that changed it did.
+  const terminated = (text: string) => (text === "" || text.endsWith("\n") ? text : `${text}\n`);
+  const merged = mergeTerminated({
+    base: terminated(base),
+    a: terminated(a),
+    b: terminated(b),
+    ancestors: ancestors?.map(terminated),
+  });
+  const [f0, fa, fb] = [base, a, b].map((text) => text.endsWith("\n"));
+  const finalNewline = fa === fb ? fa : fa !== f0 ? fa : fb;
+  return !finalNewline && merged.endsWith("\n") ? merged.slice(0, -1) : merged;
+}
+
+function mergeTerminated(opts: {
+  base: string;
+  a: string;
+  b: string;
   ancestors?: string[];
 }): string {
   const { base, a, b, ancestors } = opts;
