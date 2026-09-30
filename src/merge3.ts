@@ -337,7 +337,7 @@ function unionLines(x: string, y: string): string {
 // (e.g. added at the end of a document without a final newline) never fuse.
 function joinAdded(x: string, y: string, separator: "\n" | " "): string {
   if (x === "" || y === "") return x + y;
-  const boundary = separator === "\n" ? /\n$/.test(x) : /\s$/.test(x) || /^\s/.test(y);
+  const boundary = separator === "\n" ? x.endsWith("\n") : /\s$/.test(x) || /^\s/.test(y);
   return boundary ? x + y : x + separator + y;
 }
 
