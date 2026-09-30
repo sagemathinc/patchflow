@@ -1,5 +1,6 @@
 /* istanbul ignore file */
 export * from "./dmp";
+export * from "./merge3";
 export * from "./types";
 export * from "./patch-id";
 export * from "./patch-utils";

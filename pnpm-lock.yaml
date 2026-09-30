@@ -7,7 +7,7 @@ settings:
 overrides:
   ajv@>=6.0.0 <6.14.0: ">=6.14.0 <7"
   baseline-browser-mapping@>=2.0.0 <2.11.0: ">=2.11.0 <3"
-  brace-expansion@>=1.0.0 <1.1.16: ">=1.1.16 <2"
+  brace-expansion@>=1.0.0 <1.1.21: ">=1.1.21 <2"
   brace-expansion@>=2.0.0 <2.0.3: ">=2.0.3 <3"
   browserslist@<=4.28.6: ">=4.28.7 <5"
   diff@>=4.0.0 <4.0.4: ">=4.0.4 <5"
@@ -1210,10 +1210,10 @@ packages:
     engines: { node: ">=6.0.0" }
     hasBin: true
 
-  brace-expansion@1.1.18:
+  brace-expansion@1.1.21:
     resolution:
       {
-        integrity: sha512-Edep/X9fGqVNmzKBVsDYIOtD+z1tuezV70LBjdCst9Tqu76lsnvRiZ6oTic1n+/BIwX6QDGAO94PN4N2SADvtw==,
+        integrity: sha512-9zeA+KLZNNzglF2TPKRQEDyx6Yby7daAkuy8MiPzpXPsYDWi/DRM8jmwUDxokQjYqBpv5DgPiwD4h4ZZSy1Ujw==,
       }
 
   braces@3.0.3:
@@ -3499,7 +3499,7 @@ snapshots:
 
   baseline-browser-mapping@2.11.21: {}
 
-  brace-expansion@1.1.18:
+  brace-expansion@1.1.21:
     dependencies:
       balanced-match: 1.0.2
       concat-map: 0.0.1
@@ -4182,7 +4182,7 @@ snapshots:
 
   minimatch@3.1.5:
     dependencies:
-      brace-expansion: 1.1.18
+      brace-expansion: 1.1.21
 
   minimist@1.2.8: {}
 
