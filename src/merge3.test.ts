@@ -165,4 +165,12 @@ describe("mergeStrings3", () => {
     expect(lines.length).toBe(80);
     expect(lines[7]).toBe(`7 ${words} left right`);
   });
+
+  it("aligns edits of one line by its words, not the spaces between them", () => {
+    // CoCalc tasks fuzzer: a diff that matched spaces instead of words made
+    // two independent edits of one line overlap, and a word was kept twice.
+    expect(merge("the x2 b8 a10 a12", "b17 the x2 b8 a10", "the x2 a10 a15 a16 a12")).toBe(
+      "b17 the x2 a10 a15 a16",
+    );
+  });
 });

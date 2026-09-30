@@ -63,29 +63,73 @@ function lineDiff(base: string, target: string): Diff {
   return diffs as Diff;
 }
 
-// Diff by whole words, runs of whitespace and single punctuation characters,
-// so a changed word is always a chunk of its own.
+// Diff by whole words (and single punctuation characters), aligned by the
+// words alone: the text is split into units of a word and the whitespace
+// before it, the sequence of words is diffed, and a matched word whose
+// preceding whitespace changed becomes a small whitespace change before an
+// unchanged word. So a changed word is always a chunk of its own, a diff
+// never matches a space instead of a word, and a whitespace change does not
+// hide a matching word.
 function wordDiff(base: string, target: string): Diff {
-  const tokenize = (text: string) => text.match(/\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) ?? [];
+  const units = (text: string) => {
+    const out: { space: string; word: string }[] = [];
+    const re = /(\s*)([\p{L}\p{N}_]+|[^\s\p{L}\p{N}_])/gu;
+    let end = 0;
+    for (let m = re.exec(text); m != null; m = re.exec(text)) {
+      out.push({ space: m[1], word: m[2] });
+      end = re.lastIndex;
+    }
+    if (end < text.length) out.push({ space: text.slice(end), word: "" });
+    return out;
+  };
+  const a = units(base);
+  const b = units(target);
   const ids = new Map<string, string>();
-  const tokens: string[] = [];
-  const encode = (text: string) =>
-    tokenize(text)
-      .map((token) => {
-        let id = ids.get(token);
+  const encode = (list: { word: string }[]) =>
+    list
+      .map(({ word }) => {
+        let id = ids.get(word);
         if (id === undefined) {
-          id = String.fromCharCode(tokens.length);
-          ids.set(token, id);
-          tokens.push(token);
+          id = String.fromCharCode(ids.size);
+          ids.set(word, id);
         }
         return id;
       })
       .join("");
-  const a = encode(base);
-  const b = encode(target);
-  if (tokens.length > 0xffff) return charDiff(base, target);
-  const diffs = diffUnits(a, b);
-  return diffs.map(([op, ids]) => [op, Array.from(ids, (id) => tokens[id.charCodeAt(0)]).join("")]);
+  const x = encode(a);
+  const y = encode(b);
+  if (ids.size > 0xffff) return charDiff(base, target);
+  const out: Diff = [];
+  const push = (op: number, text: string) => {
+    if (text === "") return;
+    const last = out[out.length - 1];
+    if (last != null && last[0] === op) last[1] += text;
+    else out.push([op, text]);
+  };
+  let i = 0;
+  let j = 0;
+  for (const [op, run] of diffUnits(x, y)) {
+    for (let k = 0; k < run.length; k++) {
+      if (op === 0) {
+        const u = a[i++];
+        const v = b[j++];
+        if (u.space === v.space) {
+          push(0, u.space + u.word);
+        } else {
+          push(-1, u.space);
+          push(1, v.space);
+          push(0, u.word);
+        }
+      } else if (op === -1) {
+        const u = a[i++];
+        push(-1, u.space + u.word);
+      } else {
+        const v = b[j++];
+        push(1, v.space + v.word);
+      }
+    }
+  }
+  return out;
 }
 
 function charDiff(base: string, target: string): Diff {
