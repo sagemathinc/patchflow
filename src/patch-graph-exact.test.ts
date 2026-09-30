@@ -327,6 +327,67 @@ describe("PatchGraph exact values (codec with merge3)", () => {
     }
   });
 
+  // Review of #6.
+  it("recognizes clean cuts after a snapshot, with older history loaded", () => {
+    const [t1, t2, t3, t4, t5] = [1, 2, 3, 4, 5].map(legacyPatchId);
+    const g = new PatchGraph({ codec: exactCodec });
+    g.add([
+      patch(t1, [], "", "one\n"),
+      { ...patch(t2, [t1], "one\n", "one\ntwo\n"), isSnapshot: true, snapshot: "one\ntwo\n" },
+      patch(t3, [t2], "one\ntwo\n", "one\ntwo\nthree\n"),
+    ]);
+    expect([t1, t2, t3].map((t) => g.isCut(t))).toEqual([true, true, true]);
+    // Two concurrent patches: neither is a cut.
+    g.add([
+      patch(t4, [t3], "one\ntwo\nthree\n", "one\ntwo\nthree\nfour\n"),
+      patch(t5, [t3], "one\ntwo\nthree\n", "zero\none\ntwo\nthree\n"),
+    ]);
+    expect([t3, t4, t5].map((t) => g.isCut(t))).toEqual([true, false, false]);
+  });
+
+  it("needs no more history for a gap covered by the current snapshot", () => {
+    const [t1, t2, t3, t4] = [1, 2, 3, 4].map(legacyPatchId);
+    const g = new PatchGraph({ codec: exactCodec });
+    g.add([
+      patch(t1, [], "", "one\n"),
+      patch(t3, [t2], "two\n", "two\nthree\n"), // t2 is missing
+      { time: t4, parents: [t1, t3], isSnapshot: true, snapshot: "one\ntwo\nthree\n", userId: 0 },
+    ]);
+    expect(g.value().toString()).toBe("one\ntwo\nthree\n");
+    expect(g.needsMoreHistory()).toBe(false);
+  });
+
+  it("still needs more history for a waiting head the value does not include", () => {
+    const [t1, t2, t3] = [1, 2, 3].map(legacyPatchId);
+    const g = new PatchGraph({ codec: exactCodec });
+    g.add([patch(t1, [], "", "one\n"), patch(t3, [t2], "one\ntwo\n", "one\ntwo\nthree\n")]);
+    expect(g.needsMoreHistory()).toBe(true);
+  });
+
+  it("does not remerge unchanged concurrent heads larger than the cache bound", () => {
+    let merges = 0;
+    const counting: DocCodec = {
+      ...exactCodec,
+      merge3: (...args) => {
+        merges++;
+        return exactCodec.merge3!(...args);
+      },
+    };
+    const text = "x".repeat(1000) + "\n";
+    const [t1, t2, t3] = [1, 2, 3].map(legacyPatchId);
+    const g = new PatchGraph({ codec: counting, exactCacheMaxSize: 100 });
+    g.add([
+      patch(t1, [], "", text),
+      patch(t2, [t1], text, text + "left\n"),
+      patch(t3, [t1], text, text + "right\n"),
+    ]);
+    const value = g.value().toString();
+    merges = 0;
+    for (let i = 0; i < 20; i++) expect(g.value().toString()).toBe(value);
+    expect(g.needsMoreHistory()).toBe(false);
+    expect(merges).toBe(0);
+  });
+
   it("falls back when a parent below a patch is missing", () => {
     const [t0, t1] = [1, 2].map(legacyPatchId);
     const g = new PatchGraph({ codec: exactCodec });

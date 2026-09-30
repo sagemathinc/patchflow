@@ -30,6 +30,13 @@ function docSize(value: { doc: Document }): number {
   return Number.isFinite(size) && size > 0 ? Math.ceil(size) : 1;
 }
 
+// Keep `doc` as the most recent entry of a small insertion-ordered map.
+function remember(map: globalThis.Map<string, Document>, key: string, doc: Document): void {
+  map.delete(key);
+  map.set(key, doc);
+  if (map.size > RECENT_EXACT_ENTRIES) map.delete(map.keys().next().value!);
+}
+
 function isRoot(patch: Patch): boolean {
   return (patch.parents ?? []).length === 0 && !(patch.isSnapshot && patch.snapshot != null);
 }
@@ -68,6 +75,8 @@ export class PatchGraph {
   // too large for the size-bounded cache, so the current value is never
   // recomputed from far back.
   private recentExact = new globalThis.Map<string, Document>();
+  // Likewise the most recent merged values of patch sets (e.g. concurrent heads).
+  private recentMerged = new globalThis.Map<string, Document>();
   private waitingCache?: Set<string>;
 
   constructor(opts: PatchGraphOptions) {
@@ -203,7 +212,22 @@ export class PatchGraph {
   needsMoreHistory(): boolean {
     if (this.codec.merge3 == null || this.mergeStrategy === "apply-all") return false;
     if (this.patches.size === 0) return false;
-    if (this.waitingPatches().size > 0) return true;
+    const waiting = this.waitingPatches();
+    if (waiting.size > 0) {
+      // Only waiting patches the current heads depend on matter; one below a
+      // loaded snapshot is covered by it.
+      const seen = new Set<string>();
+      const stack = this.getHeads();
+      while (stack.length > 0) {
+        const t = stack.pop()!;
+        if (seen.has(t)) continue;
+        seen.add(t);
+        const patch = this.patches.get(t);
+        if (patch == null || waiting.has(t)) return true;
+        if (patch.isSnapshot && patch.snapshot != null) continue;
+        stack.push(...(patch.parents ?? []));
+      }
+    }
     const heads = this.getValueHeads();
     return heads.length > 0 && this.exactValueOfSet(heads) == null;
   }
@@ -225,10 +249,9 @@ export class PatchGraph {
         for (const u of next(t)) if (this.patches.has(u) && !related.has(u)) stack.push(u);
       }
     };
-    walk(time, (t) => {
-      const patch = this.patches.get(t)!;
-      return patch.isSnapshot && patch.snapshot != null && t !== time ? [] : (patch.parents ?? []);
-    });
+    // Ancestry continues through snapshots: a snapshot ends reconstructing a
+    // value, not the ancestor relation.
+    walk(time, (t) => this.patches.get(t)!.parents ?? []);
     walk(time, (t) => this.children.get(t) ?? []);
     return related.size === this.patches.size;
   }
@@ -615,6 +638,7 @@ export class PatchGraph {
     this.exactCache.clear();
     this.exactMergeCache.clear();
     this.recentExact.clear();
+    this.recentMerged.clear();
   }
 
   // Exact value of a single patch: the patch applied to the (merged) value of
@@ -687,13 +711,7 @@ export class PatchGraph {
       for (const parent of parents) release(parent);
     }
     const doc = get(time);
-    if (doc != null) {
-      this.recentExact.delete(time);
-      this.recentExact.set(time, doc);
-      if (this.recentExact.size > RECENT_EXACT_ENTRIES) {
-        this.recentExact.delete(this.recentExact.keys().next().value!);
-      }
-    }
+    if (doc != null) remember(this.recentExact, time, doc);
     return doc;
   }
 
@@ -707,6 +725,8 @@ export class PatchGraph {
     const sorted = this.sortHeads(Array.from(new Set(times)));
     if (sorted.length === 1) return get(sorted[0]) ?? this.exactValue(sorted[0]);
     const key = sorted.join(",");
+    const recent = this.recentMerged.get(key);
+    if (recent) return recent;
     const cached = this.exactMergeCache.get(key);
     if (cached) return cached.doc;
     const merge3 = this.codec.merge3!;
@@ -722,6 +742,7 @@ export class PatchGraph {
       accTimes = [...accTimes, t];
     }
     this.exactMergeCache.set(key, { doc: acc });
+    remember(this.recentMerged, key, acc);
     return acc;
   }
 
