@@ -115,6 +115,54 @@ export class PatchGraph {
     return added;
   }
 
+  // Heads whose merged value value() returns, and on which Session commits.
+  // With exact merges (codec.merge3), a patch whose parent is missing from
+  // inside the loaded history (a gap, e.g. from out-of-order delivery) is held
+  // back with its descendants until the parent arrives, instead of being
+  // fuzzy-applied to text it was not made against. A missing parent older than
+  // all loaded history (history loaded from a snapshot) holds nothing back.
+  getValueHeads(): string[] {
+    const heads = this.getHeads();
+    if (this.codec.merge3 == null || this.mergeStrategy === "apply-all") return heads;
+    const waiting = this.waitingPatches();
+    if (waiting.size === 0) return heads;
+    const settled: string[] = [];
+    this.patches.forEach((_, time) => {
+      if (waiting.has(time)) return;
+      const kids = this.children.get(time);
+      if (kids && Array.from(kids).some((kid) => this.patches.has(kid) && !waiting.has(kid)))
+        return;
+      settled.push(time);
+    });
+    return settled.length > 0 ? settled.sort(comparePatchId) : heads;
+  }
+
+  // Patches below a gap in the loaded history, with their descendants.
+  private waitingPatches(): Set<string> {
+    let oldest: string | undefined;
+    this.patches.forEach((_, time) => {
+      if (oldest === undefined || comparePatchId(time, oldest) < 0) oldest = time;
+    });
+    const stack: string[] = [];
+    this.patches.forEach((patch, time) => {
+      if (patch.isSnapshot && patch.snapshot != null) return;
+      const gap = (patch.parents ?? []).some(
+        (parent) => !this.patches.has(parent) && comparePatchId(parent, oldest!) > 0,
+      );
+      if (gap) stack.push(time);
+    });
+    const waiting = new Set<string>();
+    while (stack.length > 0) {
+      const time = stack.pop()!;
+      if (waiting.has(time)) continue;
+      waiting.add(time);
+      for (const kid of this.children.get(time) ?? []) {
+        if (this.patches.has(kid)) stack.push(kid);
+      }
+    }
+    return waiting;
+  }
+
   getHeads(): string[] {
     const allTimes = new Set(this.patches.keySeq().toArray());
     const parents = new Set<string>();
@@ -241,11 +289,16 @@ export class PatchGraph {
       throw new Error(`unknown time: ${opts.time}`);
     }
     const without = new Set<string>(opts.withoutTimes ?? []);
-    const headTimes = opts.time != null ? [opts.time] : this.getHeads();
+    const strategy = opts.mergeStrategy ?? this.mergeStrategy;
+    const headTimes =
+      opts.time != null
+        ? [opts.time]
+        : this.codec.merge3 != null && without.size === 0 && strategy !== "apply-all"
+          ? this.getValueHeads()
+          : this.getHeads();
     if (headTimes.length === 0) {
       return this.codec.fromString("");
     }
-    const strategy = opts.mergeStrategy ?? this.mergeStrategy;
     if (this.codec.merge3 != null && without.size === 0 && strategy !== "apply-all") {
       // Exact values: every patch applies to the value of its own parents, and
       // concurrent heads merge from their common ancestor. Falls back to
@@ -471,19 +524,14 @@ export class PatchGraph {
     sideA: string[],
     t: string,
   ): { base: Document; ancestors?: Document[] } | undefined {
-    const a = this.ancestry(sideA);
-    const b = this.ancestry([t]);
-    if (a == null || b == null) return undefined;
-    const common = new Set<string>();
-    for (const x of a.times) if (b.times.has(x)) common.add(x);
-    if (common.size === 0) {
+    const found = this.commonAncestors(sideA, [t]) ?? this.commonAncestorsFull(sideA, [t]);
+    if (found == null) return undefined;
+    const { maximal, complete } = found;
+    if (maximal.length === 0) {
       // Merging against an empty base when history is merely truncated would
       // duplicate everything; only do it for genuinely independent roots.
-      return a.complete && b.complete ? { base: this.codec.fromString("") } : undefined;
+      return complete ? { base: this.codec.fromString("") } : undefined;
     }
-    const maximal = Array.from(common).filter(
-      (c) => !Array.from(this.children.get(c) ?? []).some((kid) => common.has(kid)),
-    );
     const base = this.exactValueOfSet(maximal);
     if (base == null) return undefined;
     if (maximal.length === 1) return { base };
@@ -494,6 +542,83 @@ export class PatchGraph {
       ancestors.push(value);
     }
     return { base, ancestors };
+  }
+
+  // Maximal common ancestors of two sides, found like git's merge-base: walk
+  // back from both sides newest first, marking which sides reach each patch,
+  // until everything left to visit is below a common ancestor. The cost depends
+  // on how far back the sides diverged, not on the length of the history.
+  // Relies on every patch being newer than its parents (Session guarantees
+  // this); returns undefined if that does not hold, so the caller falls back.
+  private commonAncestors(
+    sideA: string[],
+    sideB: string[],
+  ): { maximal: string[]; complete: boolean } | undefined {
+    const A = 1;
+    const B = 2;
+    const STALE = 4;
+    const flags = new globalThis.Map<string, number>();
+    const popped = new Set<string>();
+    const queue: string[] = []; // ascending by time; the newest is popped first
+    const push = (time: string, flag: number): boolean => {
+      const old = flags.get(time) ?? 0;
+      const next = old | flag;
+      if (next === old) return true;
+      if (popped.has(time)) return false; // reached after it was processed
+      flags.set(time, next);
+      if (old === 0) {
+        let lo = 0;
+        let hi = queue.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (comparePatchId(queue[mid], time) < 0) lo = mid + 1;
+          else hi = mid;
+        }
+        queue.splice(lo, 0, time);
+      }
+      return true;
+    };
+    for (const time of sideA) push(time, A);
+    for (const time of sideB) push(time, B);
+    const maximal: string[] = [];
+    let complete = true;
+    while (queue.some((time) => !((flags.get(time) ?? 0) & STALE))) {
+      const time = queue.pop()!;
+      popped.add(time);
+      let flag = flags.get(time)!;
+      if ((flag & (A | B)) === (A | B) && !(flag & STALE)) {
+        maximal.push(time);
+        flag |= STALE;
+        flags.set(time, flag);
+      }
+      const patch = this.patches.get(time);
+      if (!patch) {
+        if (!(flag & STALE)) complete = false;
+        continue;
+      }
+      for (const parent of patch.parents ?? []) {
+        if (comparePatchId(parent, time) >= 0) return undefined;
+        if (!push(parent, flag)) return undefined;
+      }
+    }
+    return { maximal, complete };
+  }
+
+  // Same result by comparing full ancestries; used when patch times are not
+  // ordered parent before child.
+  private commonAncestorsFull(
+    sideA: string[],
+    sideB: string[],
+  ): { maximal: string[]; complete: boolean } | undefined {
+    const a = this.ancestry(sideA);
+    const b = this.ancestry(sideB);
+    if (a == null || b == null) return undefined;
+    const common = new Set<string>();
+    for (const x of a.times) if (b.times.has(x)) common.add(x);
+    const maximal = Array.from(common).filter(
+      (c) => !Array.from(this.children.get(c) ?? []).some((kid) => common.has(kid)),
+    );
+    return { maximal, complete: a.complete && b.complete };
   }
 
   // All ancestors (including the given times) present in the graph, and whether

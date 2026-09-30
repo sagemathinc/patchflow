@@ -158,17 +158,33 @@ interface Edit {
   insert: string;
 }
 
+// Edits of a line diff. Changes separated only by unchanged blank lines form
+// one edit (the blank lines are replaced by themselves), since blank lines are
+// not reliable anchors: otherwise one change could be split around a blank
+// line that the other side's diff matched differently.
 function diffToEdits(diffs: Diff): Edit[] {
   const edits: Edit[] = [];
   let cursor = 0;
   let current: Edit | undefined;
+  let blank = ""; // unchanged blank lines after `current`, not yet decided
   for (const [op, text] of diffs) {
     if (op === 0) {
+      if (current && text.trim() === "") {
+        blank += text;
+        cursor += text.length;
+        continue;
+      }
       if (current) edits.push(current);
       current = undefined;
+      blank = "";
       cursor += text.length;
       continue;
     }
+    if (current && blank) {
+      current.to += blank.length;
+      current.insert += blank;
+    }
+    blank = "";
     current ??= { from: cursor, to: cursor, insert: "" };
     if (op === -1) {
       current.to += text.length;
@@ -290,8 +306,10 @@ function splitLines(text: string): string[] {
 type LineState = { kind: "kept" } | { kind: "deleted" } | { kind: "modified"; text: string };
 
 // How one side changed each base line of a region: kept, deleted or modified
-// (an inserted line that keeps enough of a deleted base line, paired in
-// order), plus the lines it added before each base line (and at the end).
+// (an inserted line that is an edit of a deleted base line, paired by the best
+// in-order alignment), plus the lines it added before each base line (and at
+// the end). Blank lines are not anchors here either: an unchanged blank line
+// between changes joins them, so an edit is not split around it.
 function lineChanges(baseLines: string[], base: string, text: string) {
   const state: LineState[] = baseLines.map(() => ({ kind: "kept" }));
   const before: string[][] = [...baseLines.map(() => []), []];
@@ -299,16 +317,22 @@ function lineChanges(baseLines: string[], base: string, text: string) {
   let deleted: number[] = [];
   let inserted: string[] = [];
   const flush = () => {
-    let next = 0;
-    for (const line of inserted) {
-      let k = next;
-      while (k < deleted.length && !isEditOf(baseLines[deleted[k]], line)) k++;
-      if (k < deleted.length) {
+    if (deleted.length === 0 && inserted.length === 0) return;
+    const pairs = alignLines(
+      inserted,
+      deleted.map((k) => baseLines[k]),
+    );
+    let next = 0; // next deleted line not yet decided
+    let p = 0;
+    for (let n = 0; n < inserted.length; n++) {
+      if (p < pairs.length && pairs[p][0] === n) {
+        const k = pairs[p][1];
         for (let m = next; m < k; m++) state[deleted[m]] = { kind: "deleted" };
-        state[deleted[k]] = { kind: "modified", text: line };
+        state[deleted[k]] = { kind: "modified", text: inserted[n] };
         next = k + 1;
+        p++;
       } else {
-        before[next < deleted.length ? deleted[next] : i].push(line);
+        before[next < deleted.length ? deleted[next] : i].push(inserted[n]);
       }
     }
     for (let m = next; m < deleted.length; m++) state[deleted[m]] = { kind: "deleted" };
@@ -318,6 +342,13 @@ function lineChanges(baseLines: string[], base: string, text: string) {
   for (const [op, run] of lineDiff(base, text)) {
     const lines = splitLines(run);
     if (op === 0) {
+      if (run.trim() === "" && (deleted.length > 0 || inserted.length > 0)) {
+        for (const line of lines) {
+          deleted.push(i++);
+          inserted.push(line);
+        }
+        continue;
+      }
       flush();
       i += lines.length;
     } else if (op === -1) {
@@ -328,6 +359,50 @@ function lineChanges(baseLines: string[], base: string, text: string) {
   }
   flush();
   return { state, before };
+}
+
+// Best in-order pairing of inserted lines with deleted lines, where a pair is
+// the same line or an edit of it, weighted by how much text the deleted line
+// has (so a real line wins over a blank one). Returns [inserted, deleted]
+// index pairs in order. Large blocks use exact matches only.
+function alignLines(inserted: string[], deleted: string[]): [number, number][] {
+  const n = inserted.length;
+  const m = deleted.length;
+  if (n === 0 || m === 0) return [];
+  const exactOnly = n * m > 40000;
+  const weight = (x: number, y: number): number => {
+    const line = deleted[y];
+    const size = 1 + line.replace(/\s/g, "").length;
+    if (inserted[x] === line) return size;
+    return !exactOnly && isEditOf(line, inserted[x]) ? size : 0;
+  };
+  const w: number[][] = [];
+  for (let x = 0; x < n; x++) {
+    w.push([]);
+    for (let y = 0; y < m; y++) w[x].push(weight(x, y));
+  }
+  const best: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let x = n - 1; x >= 0; x--) {
+    for (let y = m - 1; y >= 0; y--) {
+      const pair = w[x][y] > 0 ? w[x][y] + best[x + 1][y + 1] : 0;
+      best[x][y] = Math.max(pair, best[x + 1][y], best[x][y + 1]);
+    }
+  }
+  const pairs: [number, number][] = [];
+  let x = 0;
+  let y = 0;
+  while (x < n && y < m) {
+    if (w[x][y] > 0 && best[x][y] === w[x][y] + best[x + 1][y + 1]) {
+      pairs.push([x, y]);
+      x++;
+      y++;
+    } else if (best[x][y] === best[x + 1][y]) {
+      x++;
+    } else {
+      y++;
+    }
+  }
+  return pairs;
 }
 
 // Line-level three-way merge of a region both sides changed. Per base line:

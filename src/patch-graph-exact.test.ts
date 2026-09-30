@@ -116,6 +116,43 @@ describe("PatchGraph exact values (codec with merge3)", () => {
     expect(g.value().toString()).toBe("file contents\n");
   });
 
+  it("merges correctly when a patch is older than its parent (clock skew)", () => {
+    const [t1, t2, t3, t4] = [1, 2, 3, 4].map(legacyPatchId);
+    const base = "one\ntwo\nthree\n";
+    const left = "ONE\ntwo\nthree\n";
+    const right = "one\ntwo\nTHREE\n";
+    const g = new PatchGraph({ codec: exactCodec });
+    g.add([
+      patch(t3, [], "", base),
+      patch(t1, [t3], base, left), // made on a skewed clock: older than its parent
+      patch(t4, [t3], base, right),
+      patch(t2, [t1], left, left + "four\n"),
+    ]);
+    expect(g.value().toString()).toBe("ONE\ntwo\nTHREE\nfour\n");
+  });
+
+  it("holds back a patch whose parent has not arrived yet", () => {
+    const [t0, t1, t2] = [1, 2, 3].map(legacyPatchId);
+    const g = new PatchGraph({ codec: exactCodec });
+    g.add([patch(t0, [], "", "a\n"), patch(t2, [t1], "a\nb\n", "a\nb\nc\n")]);
+    // t2 was made on top of t1, which is still in flight.
+    expect(g.getValueHeads()).toEqual([t0]);
+    expect(g.value().toString()).toBe("a\n");
+    g.add([patch(t1, [t0], "a\n", "a\nb\n")]);
+    expect(g.getValueHeads()).toEqual([t2]);
+    expect(g.value().toString()).toBe("a\nb\nc\n");
+  });
+
+  it("does not hold back patches whose parents are below the loaded history", () => {
+    const [t0, t1, t2] = [1, 2, 3].map(legacyPatchId);
+    const g = new PatchGraph({ codec: legacyCodec });
+    g.add([patch(t1, [t0], "a\n", "a\nb\n"), patch(t2, [t1], "a\nb\n", "a\nb\nc\n")]);
+    expect(g.getValueHeads()).toEqual([t2]);
+    const exact = new PatchGraph({ codec: exactCodec });
+    exact.add([patch(t1, [t0], "a\n", "a\nb\n"), patch(t2, [t1], "a\nb\n", "a\nb\nc\n")]);
+    expect(exact.getValueHeads()).toEqual([t2]);
+  });
+
   it("falls back when a parent below a patch is missing", () => {
     const [t0, t1] = [1, 2].map(legacyPatchId);
     const g = new PatchGraph({ codec: exactCodec });

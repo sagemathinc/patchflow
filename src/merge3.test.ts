@@ -65,4 +65,16 @@ describe("mergeStrings3", () => {
       "a\nfirst rewrite\nsecond rewrite\nz\n",
     );
   });
+
+  it("does not split an edit around a blank line the diffs matched differently", () => {
+    // Found by CoCalc's editor fuzzer: both sides rewrote the same Markdown
+    // line; one also added a block before it and dropped the trailing blank.
+    const base = "x\n\n****six** fourteen**   thirteen \n\n";
+    const a = "x\n\n**six** fourteen   thirteen \n\n";
+    const b = "x\n\n> quoted\n\n**six** fourteen    new thirteen \n";
+    const out = merge(base, a, b);
+    expect(out.split("six").length - 1).toBe(1);
+    expect(out).toContain("> quoted");
+    expect(out).toContain("new thirteen");
+  });
 });
