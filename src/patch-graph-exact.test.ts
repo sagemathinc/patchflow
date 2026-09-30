@@ -228,6 +228,105 @@ describe("PatchGraph exact values (codec with merge3)", () => {
     expect(base.split("\n").length).toBe(202);
   });
 
+  // A history with bursts of concurrent edits, as [patch, value after it].
+  const randomHistory = (n: number, big = "") => {
+    let seed = 3;
+    const rng = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    const g = new PatchGraph({ codec: exactCodec });
+    const patches: Patch[] = [];
+    let time = 0;
+    const add = (parents: string[], from: string, to: string) => {
+      const p = patch(legacyPatchId(++time), parents, from, to);
+      g.add([p]);
+      patches.push(p);
+    };
+    add([], "", big + "start\n");
+    while (time < n) {
+      const heads = g.getHeads();
+      const base = g.value().toString();
+      const burst = rng() < 0.3 ? 2 : 1;
+      for (let i = 0; i < burst; i++) add(heads, base, base + `line ${time} ${i}\n`);
+    }
+    return patches;
+  };
+
+  it("gives the same values with a tiny size bound on the exact cache", () => {
+    const patches = randomHistory(300);
+    const full = new PatchGraph({ codec: exactCodec });
+    full.add(patches);
+    const tiny = new PatchGraph({ codec: exactCodec, exactCacheMaxSize: 50 });
+    tiny.add(patches);
+    expect(tiny.value().toString()).toBe(full.value().toString());
+    for (const p of patches.filter((_, i) => i % 37 === 0)) {
+      expect(tiny.version(p.time).toString()).toBe(full.version(p.time).toString());
+    }
+    expect((tiny as any).exactCache.calculatedSize).toBeLessThanOrEqual(50);
+  });
+
+  it("updates a document larger than the cache bound incrementally", () => {
+    const big = "x".repeat(1000) + "\n";
+    const patches = randomHistory(200, big);
+    let applied = 0;
+    const counting: DocCodec = {
+      ...exactCodec,
+      applyPatch: (d, p) => {
+        applied++;
+        return d.applyPatch(p);
+      },
+    };
+    const g = new PatchGraph({ codec: counting, exactCacheMaxSize: 100 });
+    g.add(patches);
+    let value = g.value().toString();
+    applied = 0;
+    for (let i = 0; i < 20; i++) {
+      const t = legacyPatchId(10_000 + i);
+      g.add([patch(t, g.getHeads(), value, value + `more ${i}\n`)]);
+      value = g.value().toString();
+    }
+    // One patch application per edit, not a replay of the whole history.
+    expect(applied).toBe(20);
+    expect(value).toContain("more 19");
+  });
+
+  it("keeps heads and held-back patches right as patches arrive in any order", () => {
+    let seed = 11;
+    const rng = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    for (let run = 0; run < 40; run++) {
+      // A random DAG: each patch has one or two earlier parents.
+      const n = 30;
+      const times = Array.from({ length: n }, (_, i) => legacyPatchId(i + 1));
+      const all: Patch[] = times.map((time, i) => {
+        const parents =
+          i === 0
+            ? []
+            : Array.from(
+                new Set(
+                  Array.from({ length: rng() < 0.3 ? 2 : 1 }, () => times[Math.floor(rng() * i)]),
+                ),
+              );
+        const p: Patch = { time, parents, patch: doc("").makePatch(doc(`${i}\n`)), userId: 0 };
+        if (i > 0 && rng() < 0.1) {
+          p.isSnapshot = true;
+          p.snapshot = `snap ${i}\n`;
+        }
+        return p;
+      });
+      // Mostly in order, with some late (out of order) arrivals and batches.
+      const pending = all.slice();
+      const g = new PatchGraph({ codec: exactCodec });
+      while (pending.length > 0) {
+        const k = rng() < 0.2 ? Math.floor(rng() * pending.length) : 0;
+        const batch = pending.splice(k, rng() < 0.2 ? 3 : 1);
+        g.add(batch);
+        g.value(); // exercise (and populate) the caches
+        const fresh = new PatchGraph({ codec: exactCodec });
+        fresh.add(all.filter((p) => (g as any).patches.has(p.time)));
+        expect(g.getHeads()).toEqual(fresh.getHeads());
+        expect(g.getValueHeads()).toEqual(fresh.getValueHeads());
+      }
+    }
+  });
+
   it("falls back when a parent below a patch is missing", () => {
     const [t0, t1] = [1, 2].map(legacyPatchId);
     const g = new PatchGraph({ codec: exactCodec });
