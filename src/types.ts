@@ -60,6 +60,15 @@ export interface DocCodec {
   applyPatch(doc: Document, patch: unknown): Document;
   applyPatchBatch(doc: Document, patches: unknown[]): Document;
   makePatch(a: Document, b: Document): unknown;
+  // Optional deterministic three-way merge of two documents that diverged from
+  // `base`; `a` is the earlier and `b` the later head. When provided, the patch
+  // graph applies each patch to the exact value of its parents and merges
+  // concurrent heads with this function, instead of applying all patches in
+  // time order with fuzzy patch application. In a criss-cross history the base
+  // is itself a merge of several common ancestors; their individual values are
+  // then passed as `ancestors`, so content they already had is not mistaken for
+  // new content added by both sides.
+  merge3?(base: Document, a: Document, b: Document, ancestors?: Document[]): Document;
 }
 
 export type MergeStrategy = "apply-all" | "three-way";

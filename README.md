@@ -41,7 +41,7 @@ Patchflow does not directly handle editors, persistence or communication.
 - Examples: interactive TCP/file demo in [examples/tcp-session.ts](./examples/tcp-session.ts) and a syncdb demo in [examples/db-immer-session.ts](./examples/db-immer-session.ts).
 - Tests: Jest coverage for patch graph, session, string docs, db docs (both backends), file queueing, presence, cursors, and working copies.
 - Deterministic PatchIds: each patch has an opaque id `time` of the form `<time36>_<client>`, where `time36` is a monotone millisecond timestamp (base36, fixed width) and `client` is a per-session random id (base64url). This avoids logical-time collisions even when the same `userId` commits concurrently from multiple devices/tabs; you no longer need to allocate unique user slots in a fixed 1024-user window. For a hard guarantee, pass an explicit unique `clientId` when constructing each `Session`.
-  
+
 ## Why the DbDocument backends (immutable/immer)?
 
 The JSONL table documents are built on immutable.js and immer to make access to the full version history of structured documents efficient and robust:
@@ -87,6 +87,31 @@ Each edit is a patch with parents; the current state is the result of applying p
 - Immutable history for time-travel and auditing.
 - Undo/redo pointers over the DAG.
 - Ability to defer expensive work (e.g., merging) until users pause, without blocking live typing.
+
+### Exact merges for strings (`DocCodec.merge3`)
+
+By default, concurrent patches are all applied in time order with fuzzy patch application, so a patch made against one head is applied to text that also contains the other head's changes. Fuzzy matching can then land a deletion on similar text elsewhere, or drop an insertion.
+
+A codec that provides `merge3(base, a, b, ancestors?)` gets exact values instead: every patch is applied to the exact value of its own parents, and concurrent heads are merged three-way from the value of their common ancestors. For strings, use the exported `mergeStrings3`:
+
+```ts
+import { mergeStrings3, StringDocument } from "patchflow";
+
+const codec = {
+  // ...fromString, toString, applyPatch, applyPatchBatch, makePatch...
+  merge3: (base, a, b, ancestors) =>
+    new StringDocument(
+      mergeStrings3({
+        base: base.toString(),
+        a: a.toString(),
+        b: b.toString(),
+        ancestors: ancestors?.map(String),
+      }),
+    ),
+};
+```
+
+`mergeStrings3` is a line-oriented diff3 that never relocates edits by fuzzy matching, keeps whatever either side typed (a duplicate is visible and easy to fix, lost text is not), never splices characters of different words or lines together, and is symmetric in its two sides. When the history needed for an exact value is not loaded (e.g., below a snapshot), the graph falls back to the default algorithm.
 
 ## Quickstart
 
