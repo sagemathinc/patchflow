@@ -9,6 +9,11 @@ const DEFAULT_DEDUP_TOLERANCE = 3000;
 const DEFAULT_VALUE_CACHE_MAX_ENTRIES = 100;
 const DEFAULT_VALUE_CACHE_MAX_SIZE = 10_000_000;
 const DEFAULT_EXACT_CACHE_MAX_ENTRIES = 2000;
+// Bound on the total size (doc.size()) of cached exact values, like the value
+// cache: a long history of a large text would otherwise keep thousands of full
+// copies of it.
+const DEFAULT_EXACT_CACHE_MAX_SIZE = 10_000_000;
+const RECENT_EXACT_ENTRIES = 8;
 
 export type PatchGraphOptions = {
   codec: DocCodec;
@@ -16,7 +21,25 @@ export type PatchGraphOptions = {
   valueCacheMaxEntries?: number;
   valueCacheMaxSize?: number;
   exactCacheMaxEntries?: number;
+  exactCacheMaxSize?: number;
 };
+
+function docSize(value: { doc: Document }): number {
+  const doc = value?.doc as any;
+  const size = doc?.size?.() ?? doc?.count?.();
+  return Number.isFinite(size) && size > 0 ? Math.ceil(size) : 1;
+}
+
+// Keep `doc` as the most recent entry of a small insertion-ordered map.
+function remember(map: globalThis.Map<string, Document>, key: string, doc: Document): void {
+  map.delete(key);
+  map.set(key, doc);
+  if (map.size > RECENT_EXACT_ENTRIES) map.delete(map.keys().next().value!);
+}
+
+function isRoot(patch: Patch): boolean {
+  return (patch.parents ?? []).length === 0 && !(patch.isSnapshot && patch.snapshot != null);
+}
 
 function patchCmp(a: Patch, b: Patch): number {
   return comparePatchId(a.time, b.time);
@@ -43,12 +66,26 @@ export class PatchGraph {
   // provides merge3 (see DocCodec.merge3).
   private exactCache: LRUCache<string, { doc: Document }>;
   private exactMergeCache: LRUCache<string, { doc: Document }>;
+  // Heads and patches waiting on a missing parent, until the graph changes.
+  private headsCache?: string[];
+  private rootKnownCache?: boolean;
+  private completeFromStart = false;
+  private oldestCache?: string;
+  // The most recently requested exact values, kept even when a document is
+  // too large for the size-bounded cache, so the current value is never
+  // recomputed from far back.
+  private recentExact = new globalThis.Map<string, Document>();
+  // Likewise the most recent merged values of patch sets (e.g. concurrent heads).
+  private recentMerged = new globalThis.Map<string, Document>();
+  private waitingCache?: Set<string>;
 
   constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
     const exactMax = opts.exactCacheMaxEntries ?? DEFAULT_EXACT_CACHE_MAX_ENTRIES;
-    this.exactCache = new LRUCache<string, { doc: Document }>({ max: exactMax });
-    this.exactMergeCache = new LRUCache<string, { doc: Document }>({ max: exactMax });
+    const exactMaxSize = opts.exactCacheMaxSize ?? DEFAULT_EXACT_CACHE_MAX_SIZE;
+    const exactOpts = { max: exactMax, maxSize: exactMaxSize, sizeCalculation: docSize };
+    this.exactCache = new LRUCache<string, { doc: Document }>(exactOpts);
+    this.exactMergeCache = new LRUCache<string, { doc: Document }>(exactOpts);
     this.mergeStrategy = opts.mergeStrategy ?? "three-way";
     const maxSize = opts.valueCacheMaxSize ?? DEFAULT_VALUE_CACHE_MAX_SIZE;
     const maxEntries = opts.valueCacheMaxEntries ?? DEFAULT_VALUE_CACHE_MAX_ENTRIES;
@@ -81,6 +118,8 @@ export class PatchGraph {
         // merge in snapshot info if it arrives later
         if (patch.isSnapshot && patch.snapshot != null && !existing.snapshot) {
           this.clearExactCaches();
+          this.waitingCache = undefined;
+          this.headsCache = undefined;
           this.patches = this.patches.set(patch.time, {
             ...existing,
             isSnapshot: true,
@@ -108,11 +147,113 @@ export class PatchGraph {
       added.push(normalized);
     }
     if (added.length === 0) return added;
+    this.updateHeadsAndWaiting(added);
     // Any structural change invalidates cached reachability/versions/merges.
     this.reachabilityCache.clear();
     this.mergeCache.clear();
     this.versionsCache = undefined;
     return added;
+  }
+
+  // Update the cached heads and waiting patches for newly added patches, or
+  // drop them to be recomputed. The common case, a new patch on top of known
+  // history, is a cheap update rather than a scan of the whole history.
+  private updateHeadsAndWaiting(added: Patch[]): void {
+    // A patch whose children are already known fills a gap: recompute.
+    const fillsGap = added.some((patch) =>
+      Array.from(this.children.get(patch.time) ?? []).some((kid) => this.patches.has(kid)),
+    );
+    if (fillsGap) {
+      this.headsCache = undefined;
+      this.waitingCache = undefined;
+      this.oldestCache = undefined;
+      return;
+    }
+    if (this.headsCache != null) {
+      const heads = new Set(this.headsCache);
+      for (const patch of added) heads.add(patch.time);
+      for (const patch of added) {
+        for (const parent of patch.parents ?? []) heads.delete(parent);
+      }
+      this.headsCache = Array.from(heads).sort(comparePatchId);
+    }
+    const oldest = this.oldestCache;
+    if (
+      this.waitingCache == null ||
+      oldest == null ||
+      this.rootKnownCache == null ||
+      added.some((patch) => comparePatchId(patch.time, oldest) <= 0 || isRoot(patch))
+    ) {
+      // An older patch changes which missing parents count as gaps.
+      this.waitingCache = undefined;
+      this.oldestCache = undefined;
+      return;
+    }
+    // In time order, so a patch sees whether its parents in this batch wait.
+    for (const patch of added.slice().sort(patchCmp)) {
+      if (patch.isSnapshot && patch.snapshot != null) continue;
+      const waits = (patch.parents ?? []).some(
+        (parent) =>
+          this.waitingCache!.has(parent) || this.isGap(parent, oldest, this.rootKnownCache!),
+      );
+      if (waits) this.waitingCache.add(patch.time);
+    }
+  }
+
+  // Whether the loaded history is not enough for the exact value: a patch is
+  // held back waiting for a missing parent, or the value depends on a patch
+  // that is not loaded. The latter happens to a document loaded from a
+  // snapshot when patches made concurrently with the snapshotted patch were
+  // appended to the stream before it: they are neither in the snapshot's value
+  // nor loaded, and later patches build on them. value() then falls back to
+  // applying all loaded patches in time order, which can differ from what
+  // clients with the full history see, so the caller should load more
+  // history (e.g. back to the previous snapshot) while this is true.
+  needsMoreHistory(): boolean {
+    if (this.codec.merge3 == null || this.mergeStrategy === "apply-all") return false;
+    if (this.patches.size === 0) return false;
+    const waiting = this.waitingPatches();
+    if (waiting.size > 0) {
+      // Only waiting patches the current heads depend on matter; one below a
+      // loaded snapshot is covered by it.
+      const seen = new Set<string>();
+      const stack = this.getHeads();
+      while (stack.length > 0) {
+        const t = stack.pop()!;
+        if (seen.has(t)) continue;
+        seen.add(t);
+        const patch = this.patches.get(t);
+        if (patch == null || waiting.has(t)) return true;
+        if (patch.isSnapshot && patch.snapshot != null) continue;
+        stack.push(...(patch.parents ?? []));
+      }
+    }
+    const heads = this.getValueHeads();
+    return heads.length > 0 && this.exactValueOfSet(heads) == null;
+  }
+
+  // Whether every other loaded patch is an ancestor or a descendant of
+  // `time`. A snapshot at such a patch is a clean cut of the history: a client
+  // that loads the snapshot and the patches after it can compute exact values
+  // without older history (see needsMoreHistory), unless a patch made before
+  // the snapshot is appended later (e.g. by a client that was offline).
+  isCut(time: string): boolean {
+    if (!this.patches.has(time)) return false;
+    const related = new Set<string>();
+    const walk = (start: string, next: (t: string) => Iterable<string>) => {
+      const stack = [start];
+      while (stack.length > 0) {
+        const t = stack.pop()!;
+        if (related.has(t) && t !== start) continue;
+        related.add(t);
+        for (const u of next(t)) if (this.patches.has(u) && !related.has(u)) stack.push(u);
+      }
+    };
+    // Ancestry continues through snapshots: a snapshot ends reconstructing a
+    // value, not the ancestor relation.
+    walk(time, (t) => this.patches.get(t)!.parents ?? []);
+    walk(time, (t) => this.children.get(t) ?? []);
+    return related.size === this.patches.size;
   }
 
   // Heads whose merged value value() returns, and on which Session commits.
@@ -134,7 +275,9 @@ export class PatchGraph {
         return;
       settled.push(time);
     });
-    return settled.length > 0 ? settled.sort(comparePatchId) : heads;
+    // Everything can be waiting only when the history is known to be complete
+    // from the start (see isGap); then the value is that of no patches yet.
+    return settled.sort(comparePatchId);
   }
 
   // Remove the changes of the excluded patches from `doc`, the exact value of
@@ -162,19 +305,47 @@ export class PatchGraph {
     return doc;
   }
 
+  // The caller knows it has every patch from the start of the history (e.g.
+  // it began with an empty history and receives the stream in full): then a
+  // missing parent has not arrived yet, even before the first patch has.
+  markCompleteFromStart(): void {
+    if (this.completeFromStart) return;
+    this.completeFromStart = true;
+    this.waitingCache = undefined;
+    this.oldestCache = undefined;
+  }
+
+  // Whether a parent is missing from inside the loaded history. With the
+  // first patch (a root) loaded, the history is complete from the start, so
+  // any missing parent has not arrived yet. Otherwise (history loaded from a
+  // snapshot) only a missing parent newer than all loaded history is a gap; an
+  // older one may be below the loaded range.
+  private isGap(parent: string, oldest: string, rootKnown: boolean): boolean {
+    if (this.patches.has(parent)) return false;
+    return rootKnown || comparePatchId(parent, oldest) > 0;
+  }
+
   // Patches below a gap in the loaded history, with their descendants. A
   // valid snapshot is self-contained, so waiting stops there.
   private waitingPatches(): Set<string> {
+    if (this.waitingCache == null) this.waitingCache = this.computeWaitingPatches();
+    return this.waitingCache;
+  }
+
+  private computeWaitingPatches(): Set<string> {
     let oldest: string | undefined;
-    this.patches.forEach((_, time) => {
+    let rootKnown = false;
+    this.patches.forEach((patch, time) => {
       if (oldest === undefined || comparePatchId(time, oldest) < 0) oldest = time;
+      if (isRoot(patch)) rootKnown = true;
     });
+    if (this.completeFromStart) rootKnown = true;
+    this.oldestCache = oldest;
+    this.rootKnownCache = rootKnown;
     const stack: string[] = [];
     this.patches.forEach((patch, time) => {
       if (patch.isSnapshot && patch.snapshot != null) return;
-      const gap = (patch.parents ?? []).some(
-        (parent) => !this.patches.has(parent) && comparePatchId(parent, oldest!) > 0,
-      );
+      const gap = (patch.parents ?? []).some((parent) => this.isGap(parent, oldest!, rootKnown));
       if (gap) stack.push(time);
     });
     const waiting = new Set<string>();
@@ -191,6 +362,11 @@ export class PatchGraph {
   }
 
   getHeads(): string[] {
+    if (this.headsCache == null) this.headsCache = this.computeHeads();
+    return this.headsCache.slice();
+  }
+
+  private computeHeads(): string[] {
     const allTimes = new Set(this.patches.keySeq().toArray());
     const parents = new Set<string>();
     this.patches.forEach((patch) => {
@@ -461,16 +637,26 @@ export class PatchGraph {
   private clearExactCaches(): void {
     this.exactCache.clear();
     this.exactMergeCache.clear();
+    this.recentExact.clear();
+    this.recentMerged.clear();
   }
 
   // Exact value of a single patch: the patch applied to the (merged) value of
   // its parents, or the snapshot text of a snapshot. Returns undefined if a
   // needed patch is missing. Computed iteratively, parents first.
   private exactValue(time: string): Document | undefined {
+    const recent = this.recentExact.get(time);
+    if (recent) return recent;
     const cached = this.exactCache.get(time);
     if (cached) return cached.doc;
+    // Values computed (or found in the cache) during this call. A value is
+    // released as soon as the patches that need it have been computed, so a
+    // long history does not hold every intermediate value at once; the size
+    // bounded cache keeps the recent ones.
     const computed = new globalThis.Map<string, Document>();
-    const get = (t: string) => computed.get(t) ?? this.exactCache.get(t)?.doc;
+    const uses = new globalThis.Map<string, number>([[time, 1]]);
+    const get = (t: string) =>
+      computed.get(t) ?? this.recentExact.get(t) ?? this.exactCache.get(t)?.doc;
     const order: string[] = [];
     const visited = new Set<string>();
     const stack: { t: string; expanded: boolean }[] = [{ t: time, expanded: false }];
@@ -480,26 +666,35 @@ export class PatchGraph {
         order.push(t);
         continue;
       }
-      if (visited.has(t) || this.exactCache.has(t)) continue;
+      if (visited.has(t)) continue;
       visited.add(t);
+      const hit = this.recentExact.get(t) ?? this.exactCache.get(t)?.doc;
+      if (hit) {
+        computed.set(t, hit);
+        continue;
+      }
       const patch = this.patches.get(t);
       if (!patch) return undefined;
       stack.push({ t, expanded: true });
       if (patch.isSnapshot && patch.snapshot != null) continue;
       for (const parent of patch.parents ?? []) {
         if (!this.patches.has(parent)) return undefined;
-        if (!visited.has(parent) && !this.exactCache.has(parent)) {
-          stack.push({ t: parent, expanded: false });
-        }
+        uses.set(parent, (uses.get(parent) ?? 0) + 1);
+        if (!visited.has(parent)) stack.push({ t: parent, expanded: false });
       }
     }
+    const release = (t: string) => {
+      const n = (uses.get(t) ?? 1) - 1;
+      uses.set(t, n);
+      if (n <= 0) computed.delete(t);
+    };
     for (const t of order) {
       const patch = this.patches.get(t)!;
       let doc: Document | undefined;
+      const parents = patch.isSnapshot && patch.snapshot != null ? [] : (patch.parents ?? []);
       if (patch.isSnapshot && patch.snapshot != null) {
         doc = this.codec.fromString(patch.snapshot);
       } else {
-        const parents = patch.parents ?? [];
         let base: Document | undefined;
         if (parents.length === 0) {
           base = this.codec.fromString("");
@@ -513,8 +708,11 @@ export class PatchGraph {
       }
       computed.set(t, doc);
       this.exactCache.set(t, { doc });
+      for (const parent of parents) release(parent);
     }
-    return get(time);
+    const doc = get(time);
+    if (doc != null) remember(this.recentExact, time, doc);
+    return doc;
   }
 
   // Exact merged value of a set of patches (heads or a merge patch's parents):
@@ -527,6 +725,8 @@ export class PatchGraph {
     const sorted = this.sortHeads(Array.from(new Set(times)));
     if (sorted.length === 1) return get(sorted[0]) ?? this.exactValue(sorted[0]);
     const key = sorted.join(",");
+    const recent = this.recentMerged.get(key);
+    if (recent) return recent;
     const cached = this.exactMergeCache.get(key);
     if (cached) return cached.doc;
     const merge3 = this.codec.merge3!;
@@ -542,6 +742,7 @@ export class PatchGraph {
       accTimes = [...accTimes, t];
     }
     this.exactMergeCache.set(key, { doc: acc });
+    remember(this.recentMerged, key, acc);
     return acc;
   }
 

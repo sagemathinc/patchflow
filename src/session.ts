@@ -96,6 +96,9 @@ export class Session extends EventEmitter {
   async init(): Promise<void> {
     const { patches, hasMore } = await this.patchStore.loadInitial();
     this.hasMoreHistory = !!hasMore;
+    // Starting from an empty history, every later patch arrives on the stream,
+    // so a patch whose parent is missing is waiting for it.
+    if (patches.length === 0 && !hasMore) this.graph.markCompleteFromStart();
     this.graph.add(patches);
     this.lastTimeMs = this.computeLastTimeMs();
     this.maxVersion = this.computeMaxVersion();
@@ -148,6 +151,21 @@ export class Session extends EventEmitter {
   markFullHistory(): void {
     this.ensureInitialized();
     this.hasMoreHistory = false;
+  }
+
+  // Whether the loaded history is not enough for the exact value (see
+  // PatchGraph.needsMoreHistory); load more history, if there is more, while
+  // this is true.
+  needsMoreHistory(): boolean {
+    this.ensureInitialized();
+    return this.graph.needsMoreHistory();
+  }
+
+  // Whether every other loaded patch is an ancestor or a descendant of `time`,
+  // so a snapshot there is a clean cut (see PatchGraph.isCut).
+  isCut(time: string): boolean {
+    this.ensureInitialized();
+    return this.graph.isCut(time);
   }
 
   // Return patch ids (versions) in ascending order.
