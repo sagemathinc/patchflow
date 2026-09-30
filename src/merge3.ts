@@ -657,6 +657,12 @@ function combineAdjacent(chunk: Chunk, words = false): string | undefined {
   if (aPost != null && bPost != null) {
     return both(aPost, bPost, !words && aPost.endsWith("\n") && bPost.endsWith("\n")) + base;
   }
+  // One side added text the other side's change also added there (with the
+  // same text both sides added, for example): keep it once.
+  if (bPre != null && a.endsWith(bPre)) return a;
+  if (bPost != null && a.startsWith(bPost)) return a;
+  if (aPre != null && b.endsWith(aPre)) return b;
+  if (aPost != null && b.startsWith(aPost)) return b;
   if (bPre != null) return a + bPre;
   if (bPost != null) return bPost + a;
   if (aPre != null) return b + aPre;
@@ -703,9 +709,10 @@ function mergeWords(words: Chunk): string {
 // Both sides changed words of a chunk, but different ones (for example,
 // neighboring words, with no unchanged word between them to split the chunk):
 // apply both sides' edits. Undefined if edits of the two sides overlap
-// (except the same edit made on both sides). Text both sides inserted at one
-// place is kept in a canonical order, and an insertion just before or after
-// the other side's edit is placed there.
+// (except the same edit made on both sides), or insert text with words in
+// common at one place. Different text both sides inserted at one place is kept
+// in a canonical order, and an insertion just before or after the other
+// side's edit is placed there.
 function disjointWordEdits(chunk: Chunk): string | undefined {
   const { base } = chunk;
   const edits = (text: string) => diffToEdits(wordDiff(base, text)).map((e) => trimEdit(base, e));
@@ -717,6 +724,9 @@ function disjointWordEdits(chunk: Chunk): string | undefined {
     const both = isInsertion(e) ? aEdits.findIndex((x) => isInsertion(x) && x.from === e.from) : -1;
     if (both !== -1) {
       const x = aEdits[both].insert;
+      // Insertions sharing words may be the same text reached by different
+      // paths; the line merge unions those without repeating common lines.
+      if (sharesWord(x, e.insert)) return undefined;
       const insert = x <= e.insert ? joinAdded(x, e.insert, " ") : joinAdded(e.insert, x, " ");
       aEdits[both] = { ...e, insert };
       continue;
@@ -731,6 +741,11 @@ function disjointWordEdits(chunk: Chunk): string | undefined {
   }
   const all = [...aEdits, ...bEdits].sort((x, y) => x.from - y.from || x.to - y.to);
   return applyEdits(base, all);
+}
+
+function sharesWord(x: string, y: string): boolean {
+  const words = new Set(x.match(/[\p{L}\p{N}_]+/gu) ?? []);
+  return (y.match(/[\p{L}\p{N}_]+/gu) ?? []).some((w) => words.has(w));
 }
 
 // An edit without the whitespace it keeps at its start and end (a replaced

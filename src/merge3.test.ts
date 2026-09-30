@@ -238,4 +238,16 @@ describe("mergeStrings3", () => {
     }
     expect(problems).toEqual([]);
   });
+
+  it("adds lines both sides added once when one side also reindented what follows", () => {
+    // CoCalc markdown fuzzer: both sides had the same new list, and one also
+    // nested the table after it into the list.
+    expect(
+      merge(
+        "notes\n| a | b |\n| 1 | 2 |\n",
+        "notes\n1. one x8\n   - sub x9\n| a | b |\n| 1 | 2 |\n",
+        "notes\n1. one x8\n   - sub x9\n     | a | b |\n     | 1 | 2 |\n",
+      ),
+    ).toBe("notes\n1. one x8\n   - sub x9\n     | a | b |\n     | 1 | 2 |\n");
+  });
 });
