@@ -242,3 +242,45 @@ describe("loading from a snapshot", () => {
     expect(failures).toEqual([]);
   });
 });
+
+describe("a session that receives the snapshotted patch last", () => {
+  it("refreshes its document when only a snapshot record is upgraded", async () => {
+    const { Session } = await import("./session");
+    const { MemoryPatchStore } = await import("./adapters/memory-patch-store");
+    const { legacyPatchId: id } = await import("./patch-id");
+    const doc = (s: string) => new StringDocument(s);
+    const patch = (t: number, parents: number[], from: string, to: string): Patch => ({
+      time: id(t),
+      parents: parents.map(id),
+      patch: doc(from).makePatch(doc(to)),
+    });
+    // t2 and t3 edit t1 concurrently, t4 builds on t2 and is snapshotted, t5
+    // merges t4 and t3.
+    const ps = [
+      patch(1, [], "", "a\nb\nc\n"),
+      patch(2, [1], "a\nb\nc\n", "A\nb\nc\n"),
+      patch(3, [1], "a\nb\nc\n", "a\nb\nC\n"),
+      patch(4, [2], "A\nb\nc\n", "A\nB\nc\n"),
+      patch(5, [4, 3], "A\nB\nC\n", "A\nB\nC\nd\n"),
+    ];
+    const snap: Patch = { time: id(4), parents: [], isSnapshot: true, snapshot: "A\nB\nc\n" };
+    const s = new Session({
+      codec: exactCodec,
+      clientId: "late",
+      patchStore: new MemoryPatchStore([snap, ps[4], ...ps.slice(0, 3)]),
+    });
+    await s.init();
+    let changes = 0;
+    s.on("change", () => changes++);
+    // The patch the snapshot is of arrives last: no new patch, but the value
+    // changes.
+    expect(s.applyRemoteBatch([ps[3]])).toEqual([]);
+    expect(changes).toBe(1);
+    expect(s.getDocument().toString()).toBe("A\nB\nC\nd\n");
+    expect(s.value().toString()).toBe("A\nB\nC\nd\n");
+    // Replaying it again changes nothing.
+    expect(s.applyRemoteBatch([ps[3]])).toEqual([]);
+    expect(changes).toBe(1);
+    s.close();
+  });
+});

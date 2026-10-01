@@ -316,8 +316,12 @@ export class Session extends EventEmitter {
   // Returns the patches that were new to this session; duplicate replay is a
   // no-op and does not emit change/patch events.
   applyRemoteBatch(envs: PatchEnvelope[]): PatchEnvelope[] {
+    const revision = this.graph.revision();
     const added = this.graph.add(envs);
     if (added.length === 0) {
+      // No new patch, but e.g. a snapshot record was upgraded with its patch,
+      // which can change the value: refresh it.
+      if (this.graph.revision() !== revision) this.syncDoc();
       return [];
     }
     for (const env of added) {
