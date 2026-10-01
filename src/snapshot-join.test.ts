@@ -147,8 +147,14 @@ function session(seed: number, codec: DocCodec) {
         const seq = t == null ? -1 : stream.findIndex((p) => p.time === t);
         if (t != null && seq >= 0 && !snapshotSeq.has(t)) {
           snapshotSeq.set(t, seq);
+          // Like CoCalc's snapshot records: the value only, without the
+          // patch or its parents.
+          const { wall, userId } = g.getPatch(t);
           append({
-            ...g.getPatch(t),
+            time: t,
+            wall,
+            userId,
+            parents: [],
             isSnapshot: true,
             snapshot: g.value({ time: t }).toString(),
           });
@@ -188,7 +194,9 @@ function session(seed: number, codec: DocCodec) {
       k--;
       const to = from;
       from = k >= 0 ? snapshotSeq.get(snapTimes[k])! : 0;
-      const older = stream.slice(from, to).filter((p) => !p.isSnapshot);
+      // Up to and including the patch the newer snapshot is of (in CoCalc,
+      // loading more history loads everything before the loaded range).
+      const older = stream.slice(from, to + 1).filter((p) => !p.isSnapshot);
       g.add(
         k >= 0
           ? [snapshotRecord(snapTimes[k]), ...older.filter((p) => p.time !== snapTimes[k])]

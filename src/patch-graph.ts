@@ -126,6 +126,38 @@ export class PatchGraph {
             snapshot: patch.snapshot,
             seqInfo: patch.seqInfo ?? existing.seqInfo,
           });
+        } else if (
+          existing.isSnapshot &&
+          existing.patch == null &&
+          !patch.isSnapshot &&
+          patch.patch != null
+        ) {
+          // A snapshot record carries only the value, not the parents: a client
+          // that loaded the document from a snapshot and then loads older history
+          // gets the patch itself here. Without its parents the snapshotted patch
+          // looks like a root, and merges whose common ancestor is below it
+          // (concurrent work) would merge from an empty base, duplicating the
+          // whole document.
+          const upgraded: Patch = {
+            ...patch,
+            parents: patch.parents ?? [],
+            isSnapshot: true,
+            snapshot: existing.snapshot,
+            seqInfo: existing.seqInfo ?? patch.seqInfo,
+          };
+          this.patches = this.patches.set(patch.time, upgraded);
+          for (const parent of upgraded.parents ?? []) {
+            const kids = this.children.get(parent) ?? new Set<string>();
+            kids.add(upgraded.time);
+            this.children = this.children.set(parent, kids);
+          }
+          this.clearExactCaches();
+          this.headsCache = undefined;
+          this.waitingCache = undefined;
+          this.oldestCache = undefined;
+          this.reachabilityCache.clear();
+          this.mergeCache.clear();
+          this.versionsCache = undefined;
         }
         continue;
       }
