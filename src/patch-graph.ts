@@ -98,6 +98,10 @@ export class PatchGraph {
   // Patches whose value has been checked against their hash: true if it
   // matched. A value is checked once, the first time it is computed.
   private hashChecked = new globalThis.Map<string, boolean>();
+  // Snapshots checked against their patch's hash (the text and the hash of a
+  // snapshot never change), and the inconsistencies reported.
+  private snapshotOk = new globalThis.Map<string, boolean>();
+  private reported = new Set<string>();
 
   constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
@@ -736,16 +740,38 @@ export class PatchGraph {
     if (!sameHashFormat(expected, actual)) return undefined;
     const ok = actual === expected;
     this.hashChecked.set(patch.time, ok);
-    if (!ok) {
-      this.onInconsistency?.({
-        kind: patch.isSnapshot && patch.snapshot != null ? "snapshot" : "patch",
-        time: patch.time,
-        expected,
-        actual,
-        userId: patch.userId,
-      });
-    }
+    if (!ok)
+      this.report({ kind: "patch", time: patch.time, expected, actual, userId: patch.userId });
     return ok;
+  }
+
+  // Whether exact values start from this patch's snapshot text: "use" (a
+  // snapshot whose text matches its patch's hash, or that cannot be checked),
+  // "bad" (it does not match: reported, and values are computed from the patch
+  // itself instead), or "none" (not a snapshot).
+  private snapshotState(patch: Patch): "use" | "bad" | "none" {
+    if (!(patch.isSnapshot && patch.snapshot != null)) return "none";
+    const expected = patch.hash;
+    if (expected == null) return "use";
+    let ok = this.snapshotOk.get(patch.time);
+    if (ok == null) {
+      const actual = this.hashOf(this.codec.fromString(patch.snapshot));
+      if (!sameHashFormat(expected, actual)) return "use";
+      ok = actual === expected;
+      this.snapshotOk.set(patch.time, ok);
+      if (!ok) {
+        this.report({ kind: "snapshot", time: patch.time, expected, actual, userId: patch.userId });
+      }
+    }
+    return ok ? "use" : "bad";
+  }
+
+  // Report an inconsistency once.
+  private report(inconsistency: Inconsistency): void {
+    const key = `${inconsistency.kind}:${inconsistency.time}:${inconsistency.actual}`;
+    if (this.reported.has(key)) return;
+    this.reported.add(key);
+    this.onInconsistency?.(inconsistency);
   }
 
   private clearExactCaches(): void {
@@ -791,7 +817,13 @@ export class PatchGraph {
       const patch = this.patches.get(t);
       if (!patch) return undefined;
       stack.push({ t, expanded: true });
-      if (patch.isSnapshot && patch.snapshot != null) continue;
+      const snapshot = this.snapshotState(patch);
+      if (snapshot === "use") continue;
+      // A snapshot that differs from its patch's value is not used: the value
+      // is computed from the patch itself, which needs its parents; if the
+      // patch is not loaded, the exact value is unknown until more history is
+      // (see needsMoreHistory).
+      if (snapshot === "bad" && patch.patch == null) return undefined;
       for (const parent of patch.parents ?? []) {
         if (!this.patches.has(parent)) return undefined;
         uses.set(parent, (uses.get(parent) ?? 0) + 1);
@@ -806,9 +838,10 @@ export class PatchGraph {
     for (const t of order) {
       const patch = this.patches.get(t)!;
       let doc: Document | undefined;
-      const parents = patch.isSnapshot && patch.snapshot != null ? [] : (patch.parents ?? []);
-      if (patch.isSnapshot && patch.snapshot != null) {
-        doc = this.codec.fromString(patch.snapshot);
+      const useSnapshot = this.snapshotState(patch) === "use";
+      const parents = useSnapshot ? [] : (patch.parents ?? []);
+      if (useSnapshot) {
+        doc = this.codec.fromString(patch.snapshot!);
       } else {
         let base: Document | undefined;
         if (parents.length === 0) {
@@ -823,12 +856,10 @@ export class PatchGraph {
       }
       computed.set(t, doc);
       this.exactCache.set(t, { doc });
-      // Check the requested value, and a snapshot's text, which every value
-      // computed from it builds on. (Intermediate values are checked when they
-      // are requested themselves, e.g. as heads, to keep loading cheap.)
-      if (t === time || (patch.isSnapshot && patch.snapshot != null)) {
-        this.checkHash(patch, doc);
-      }
+      // Check the requested value. (Intermediate values are checked when they
+      // are requested themselves, e.g. as heads, to keep loading cheap; a
+      // snapshot's text is checked before it is used, see snapshotState.)
+      if (t === time && !useSnapshot) this.checkHash(patch, doc);
       for (const parent of parents) release(parent);
     }
     const doc = get(time);

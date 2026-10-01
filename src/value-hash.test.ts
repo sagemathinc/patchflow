@@ -135,17 +135,48 @@ describe("value hashes", () => {
     expect(reports.length).toBe(1);
   });
 
-  it("reports a snapshot whose text differs from the value of its patch", () => {
+  it("reports a snapshot that differs from its patch's value, and recovers from the patch", () => {
     const reports: Inconsistency[] = [];
     const g = new PatchGraph({ codec: exactCodec, onInconsistency: (e) => reports.push(e) });
-    const [t0, t1] = [1, 2].map(legacyPatchId);
-    // A snapshot record carries the hash of the patch it is a snapshot of.
-    g.add([
-      { time: t0, parents: [], isSnapshot: true, snapshot: "x\nx\n", hash: hashString("x\n") },
-      { time: t1, parents: [t0], patch: doc("x\n").makePatch(doc("x\ny\n")) },
-    ]);
+    const [t0, t1, t2] = [1, 2, 3].map(legacyPatchId);
+    const p0 = {
+      time: t0,
+      parents: [],
+      patch: doc("").makePatch(doc("x\n")),
+      hash: hashString("x\n"),
+    };
+    const p1 = {
+      time: t1,
+      parents: [t0],
+      patch: doc("x\n").makePatch(doc("x\ny\n")),
+      hash: hashString("x\ny\n"),
+    };
+    const p2 = { time: t2, parents: [t1], patch: doc("x\ny\n").makePatch(doc("x\ny\nz\n")) };
+    // Loaded from a wrong snapshot of t1 (it carries t1's hash), without
+    // older history.
+    g.add([{ time: t1, parents: [], isSnapshot: true, snapshot: "x\nx\ny\n", hash: p1.hash }, p2]);
     g.value();
-    expect(reports.map((e) => [e.kind, e.time])).toEqual([["snapshot", t0]]);
+    expect(reports.map((e) => [e.kind, e.time])).toEqual([["snapshot", t1]]);
+    // The exact value is unknown until the snapshotted patch is loaded.
+    expect(g.needsMoreHistory()).toBe(true);
+    g.add([p0, p1]);
+    expect(g.needsMoreHistory()).toBe(false);
+    expect(g.value().toString()).toBe("x\ny\nz\n");
+    expect(g.verifyValue(t1)).toBe("ok");
+    expect(reports.length).toBe(1);
+  });
+
+  it("uses a snapshot that matches its patch's value", () => {
+    const reports: Inconsistency[] = [];
+    const g = new PatchGraph({ codec: exactCodec, onInconsistency: (e) => reports.push(e) });
+    const [t1, t2] = [2, 3].map(legacyPatchId);
+    g.add([
+      { time: t1, parents: [], isSnapshot: true, snapshot: "x\ny\n", hash: hashString("x\ny\n") },
+      { time: t2, parents: [t1], patch: doc("x\ny\n").makePatch(doc("x\ny\nz\n")) },
+    ]);
+    expect(g.value().toString()).toBe("x\ny\nz\n");
+    expect(g.needsMoreHistory()).toBe(false);
+    expect(reports).toEqual([]);
   });
 
   it("does not compare hashes of an unknown format or values that are not exact", () => {
