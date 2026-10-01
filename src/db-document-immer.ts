@@ -474,18 +474,24 @@ export class DbDocumentImmer implements Document {
 
   // Select matching record indices via primary-key index.
   private select(where: WhereCondition): Set<number> {
-    const n = len(where as JsMap);
-    let result: Set<number> | undefined;
+    const matches: Set<number>[] = [];
     for (const field in where) {
       const value = where[field];
       const index = this.indexes.get(field);
       if (!index) {
         throw new Error(`field '${field}' must be a primary key`);
       }
-      const matches = index.get(toKey(value));
-      if (!matches) return new Set();
-      if (n === 1) return new Set(matches);
-      result = result ? this.intersect(result, matches) : new Set(matches);
+      const found = index.get(toKey(value));
+      if (!found) return new Set();
+      matches.push(found);
+    }
+    let result: Set<number> | undefined;
+    if (matches.length > 0) {
+      // Filter the smallest set by the others: a key field shared by many
+      // records (e.g. a type) must not make every lookup cost that many.
+      matches.sort((a, b) => a.size - b.size);
+      result = new Set(matches[0]);
+      for (const other of matches.slice(1)) result = this.intersect(result, other);
     }
     if (!result) {
       // empty where -> everything

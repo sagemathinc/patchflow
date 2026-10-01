@@ -3,6 +3,7 @@ import { Session } from "./session";
 import { legacyPatchId } from "./patch-id";
 import { mergeStrings3 } from "./merge3";
 import { StringDocument } from "./string-document";
+import { createDbCodec } from "./db-document-immutable";
 import type { DocCodec, Document, Patch } from "./types";
 
 const exactCodec: DocCodec = {
@@ -416,6 +417,81 @@ describe("PatchGraph exact values (codec with merge3)", () => {
     for (let i = 0; i < 20; i++) expect(g.value().toString()).toBe(value);
     expect(g.needsMoreHistory()).toBe(false);
     expect(merges).toBe(0);
+  });
+
+  // Several clients that each commit on top of the heads they have seen and
+  // now and then catch up: a criss-cross history like a busy meeting's.
+  const wideHistory = (clients: number, n: number) => {
+    let seed = 7;
+    const rng = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    const g = new PatchGraph({ codec: exactCodec });
+    const patches: Patch[] = [];
+    let time = 0;
+    const t0 = legacyPatchId(++time);
+    patches.push(patch(t0, [], "", "start\n"));
+    g.add(patches);
+    const seen: string[][] = Array.from({ length: clients }, () => [t0]);
+    while (time < n) {
+      const c = Math.floor(rng() * clients);
+      const base = parentsValue(g, seen[c]);
+      const p = patch(legacyPatchId(++time), seen[c], base, base + `c${c} ${time}\n`);
+      g.add([p]);
+      patches.push(p);
+      seen[c] = [p.time];
+      if (rng() < 0.4) seen[Math.floor(rng() * clients)] = g.getHeads();
+    }
+    return patches;
+  };
+
+  it("merges a wide criss-cross history incrementally with a tiny cache", () => {
+    // A 30 minute, 10 user notebook stalled: merging needed more values than
+    // the cache held, and each evicted one was recomputed by repeating the
+    // merge recursion below it, exponentially often.
+    const patches = wideHistory(10, 150);
+    const full = new PatchGraph({ codec: exactCodec });
+    full.add(patches);
+    // Each value takes well under 1000 merges (about 150); before the fix
+    // they grew without bound.
+    let merges = 0;
+    const counting: DocCodec = {
+      ...exactCodec,
+      merge3: (...args) => {
+        if (++merges > 1000) throw new Error("too many merges for one value");
+        return exactCodec.merge3!(...args);
+      },
+    };
+    const tiny = new PatchGraph({ codec: counting, exactCacheMaxEntries: 4 });
+    for (const p of patches) {
+      merges = 0;
+      tiny.add([p]);
+      tiny.value();
+    }
+    expect(tiny.value().toString()).toBe(full.value().toString());
+  });
+
+  it("caches as many database document values as records allow", () => {
+    // doc.size() estimates a database document's JSONL text, about a thousand
+    // per record; cached versions share their records, so the cache counts
+    // records instead and keeps enough values for merging.
+    const codec = {
+      ...createDbCodec({ primaryKeys: ["id"] }),
+      merge3: (_b: Document, a: Document) => a,
+    };
+    const rows = Array.from({ length: 300 }, (_, i) => JSON.stringify({ id: i, x: 0 })).join("\n");
+    const g = new PatchGraph({ codec });
+    let value = codec.fromString(rows);
+    let prev = legacyPatchId(1);
+    g.add([
+      { time: prev, parents: [], patch: codec.makePatch(codec.fromString(""), value), userId: 0 },
+    ]);
+    for (let i = 2; i <= 101; i++) {
+      const next = codec.fromString(rows.replace(`{"id":${i},"x":0}`, `{"id":${i},"x":1}`));
+      const t = legacyPatchId(i);
+      g.add([{ time: t, parents: [prev], patch: codec.makePatch(value, next), userId: 0 }]);
+      g.version(t);
+      [value, prev] = [next, t];
+    }
+    expect((g as any).exactCache.size).toBeGreaterThan(90);
   });
 
   it("falls back when a parent below a patch is missing", () => {
