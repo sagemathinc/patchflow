@@ -179,6 +179,24 @@ export class Session extends EventEmitter {
     return this.graph.verifyValue(time);
   }
 
+  // False while the document depends on a snapshot that differs from its
+  // patch's value and that patch is not loaded (see
+  // PatchGraph.valueUnavailable): getDocument() is then a best-effort view
+  // without that snapshot, commit() refuses to record anything on top of it,
+  // and needsMoreHistory() is true; loading more history makes it available.
+  isValueAvailable(): boolean {
+    this.ensureInitialized();
+    return !this.graph.valueUnavailable();
+  }
+
+  private assertValueAvailable(): void {
+    if (this.graph.valueUnavailable()) {
+      throw new Error(
+        "patchflow: the document's value is not known (a snapshot differs from its patch's value); load more history before committing",
+      );
+    }
+  }
+
   // Hash of a value, as stored in Patch.hash.
   hashOf(doc: Document): string {
     return this.graph.hashOf(doc);
@@ -291,6 +309,7 @@ export class Session extends EventEmitter {
     if (!this.committedDoc) {
       throw new Error("session not initialized");
     }
+    this.assertValueAvailable();
     const parents = this.graph.getValueHeads();
     // With exact values, make the patch against the exact value of its
     // parents, which is what every client applies it to; then the history
@@ -588,6 +607,8 @@ export class Session extends EventEmitter {
   // Convert external doc changes into a patch and append it.
   private async applyExternalDoc(newDoc: Document): Promise<void> {
     if (!this.doc) return;
+    // Not on top of a value that is known to be wrong (see isValueAvailable).
+    if (!this.isValueAvailable()) return;
     const parents = this.graph.getValueHeads();
     // Against the exact value of the parents, as in commit().
     const parentsValue = this.graph.exactValueOf(parents);

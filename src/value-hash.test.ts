@@ -213,4 +213,60 @@ describe("value hashes", () => {
     expect(fresh.verifyValue(env.time)).toBe("ok");
     expect(reports).toEqual([]);
   });
+  it("never uses a rejected snapshot, and refuses commits until the value is known", async () => {
+    const t1 = legacyPatchId(1);
+    const good = {
+      time: t1,
+      parents: [],
+      patch: doc("").makePatch(doc("GOOD\n")),
+      hash: hashString("GOOD\n"),
+    };
+    const store = new MemoryPatchStore([
+      { time: t1, parents: [], isSnapshot: true, snapshot: "BAD\n", hash: hashString("GOOD\n") },
+    ]);
+    const reports: Inconsistency[] = [];
+    const s = await session(store, "late", reports);
+    expect(reports.map((e) => e.kind)).toEqual(["snapshot"]);
+    // Neither the exact value nor the fallback uses the rejected text.
+    expect(s.value().toString()).not.toContain("BAD");
+    expect(s.getDocument().toString()).not.toContain("BAD");
+    expect(s.isValueAvailable()).toBe(false);
+    expect(s.needsMoreHistory()).toBe(true);
+    expect(() => s.commit(doc("BAD\nedit\n"))).toThrow(/load more history/);
+    expect(s.versions()).toEqual([t1]);
+    // The patch the snapshot is of arrives (more history): the value is known.
+    let changes = 0;
+    s.on("change", () => changes++);
+    s.applyRemoteBatch([good]);
+    expect(changes).toBe(1);
+    expect(s.isValueAvailable()).toBe(true);
+    expect(s.needsMoreHistory()).toBe(false);
+    expect(s.getDocument().toString()).toBe("GOOD\n");
+    const env = s.commit(doc("GOOD\nedit\n"));
+    expect(env.hash).toBe(hashString("GOOD\nedit\n"));
+    expect(reports.length).toBe(1);
+  });
+
+  it("checks a value computed earlier as an intermediate one when it is requested", () => {
+    const reports: Inconsistency[] = [];
+    const g = new PatchGraph({ codec: exactCodec, onInconsistency: (e) => reports.push(e) });
+    const [t1, t2] = [1, 2].map(legacyPatchId);
+    g.add([
+      { time: t1, parents: [], patch: doc("").makePatch(doc("a\n")), hash: hashString("WRONG") },
+      {
+        time: t2,
+        parents: [t1],
+        patch: doc("a\n").makePatch(doc("a\nb\n")),
+        hash: hashString("a\nb\n"),
+      },
+    ]);
+    // Reading the head computes t1's value as an intermediate one (unchecked).
+    expect(g.value().toString()).toBe("a\nb\n");
+    expect(reports).toEqual([]);
+    // Reading t1 itself (e.g. in TimeTravel) checks it.
+    expect(g.value({ time: t1 }).toString()).toBe("a\n");
+    expect(reports.map((e) => [e.kind, e.time])).toEqual([["patch", t1]]);
+    g.value({ time: t1 });
+    expect(reports.length).toBe(1);
+  });
 });

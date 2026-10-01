@@ -94,6 +94,7 @@ export class PatchGraph {
   // Incremented whenever the graph changes in a way that can change values:
   // new patches, or a snapshot record upgraded with its patch (see add).
   private revisionCount = 0;
+  private unavailableCache?: { revision: number; value: boolean };
   private onInconsistency?: (inconsistency: Inconsistency) => void;
   // Patches whose value has been checked against their hash: true if it
   // matched. A value is checked once, the first time it is computed.
@@ -760,10 +761,40 @@ export class PatchGraph {
       ok = actual === expected;
       this.snapshotOk.set(patch.time, ok);
       if (!ok) {
+        // Values computed before (e.g. by the apply-all fallback) may have
+        // started from it.
+        this.valueCache.clear();
+        this.mergeCache.clear();
         this.report({ kind: "snapshot", time: patch.time, expected, actual, userId: patch.userId });
       }
     }
     return ok ? "use" : "bad";
+  }
+
+  // Whether the value depends on a snapshot that differs from its patch's
+  // value while that patch is not loaded: then no trustworthy value is known
+  // (value() is a best-effort view without that snapshot) until more history
+  // is loaded (needsMoreHistory() is true). Session refuses to commit then.
+  valueUnavailable(): boolean {
+    if (this.unavailableCache?.revision === this.revisionCount) {
+      return this.unavailableCache.value;
+    }
+    let value = false;
+    const seen = new Set<string>();
+    const stack = this.getValueHeads();
+    while (stack.length > 0 && !value) {
+      const t = stack.pop()!;
+      if (seen.has(t)) continue;
+      seen.add(t);
+      const patch = this.patches.get(t);
+      if (patch == null) continue; // below the loaded history
+      const state = this.snapshotState(patch);
+      if (state === "use") continue;
+      if (state === "bad" && patch.patch == null) value = true;
+      stack.push(...(patch.parents ?? []));
+    }
+    this.unavailableCache = { revision: this.revisionCount, value };
+    return value;
   }
 
   // Report an inconsistency once.
@@ -786,10 +817,14 @@ export class PatchGraph {
   // its parents, or the snapshot text of a snapshot. Returns undefined if a
   // needed patch is missing. Computed iteratively, parents first.
   private exactValue(time: string): Document | undefined {
-    const recent = this.recentExact.get(time);
-    if (recent) return recent;
-    const cached = this.exactCache.get(time);
-    if (cached) return cached.doc;
+    // A requested value is checked against its hash even when it was
+    // computed earlier as an intermediate value, which is not checked.
+    const hit = this.recentExact.get(time) ?? this.exactCache.get(time)?.doc;
+    if (hit) {
+      const patch = this.patches.get(time);
+      if (patch != null && this.snapshotState(patch) !== "use") this.checkHash(patch, hit);
+      return hit;
+    }
     // Values computed (or found in the cache) during this call. A value is
     // released as soon as the patches that need it have been computed, so a
     // long history does not hold every intermediate value at once; the size
@@ -1059,7 +1094,8 @@ export class PatchGraph {
     let best: Patch | undefined;
     for (const t of times) {
       const p = this.patches.get(t);
-      if (p?.isSnapshot && p.snapshot != null) {
+      // Never start from a snapshot that differs from its patch's value.
+      if (p != null && this.snapshotState(p) === "use") {
         if (!best || comparePatchId(p.time, best.time) > 0) {
           best = p;
         }
