@@ -772,26 +772,38 @@ export class PatchGraph {
   }
 
   // Whether the value depends on a snapshot that differs from its patch's
-  // value while that patch is not loaded: then no trustworthy value is known
-  // (value() is a best-effort view without that snapshot) until more history
-  // is loaded (needsMoreHistory() is true). Session refuses to commit then.
+  // value and that patch's exact value cannot be computed yet, because the
+  // patch or one of its ancestors is not loaded: then no trustworthy value is
+  // known (value() is a best-effort view without that snapshot) until more
+  // history is loaded (needsMoreHistory() is true). Session refuses to commit
+  // and to write the value to a file then.
   valueUnavailable(): boolean {
     if (this.unavailableCache?.revision === this.revisionCount) {
       return this.unavailableCache.value;
     }
     let value = false;
-    const seen = new Set<string>();
-    const stack = this.getValueHeads();
+    // Patches below a rejected snapshot are needed to compute its value; other
+    // missing patches are merely below the loaded history.
+    const seen = new globalThis.Map<string, boolean>();
+    const stack = this.getValueHeads().map((t) => ({ t, needed: false }));
     while (stack.length > 0 && !value) {
-      const t = stack.pop()!;
-      if (seen.has(t)) continue;
-      seen.add(t);
+      const { t, needed } = stack.pop()!;
+      const before = seen.get(t);
+      if (before === true || (before === false && !needed)) continue;
+      seen.set(t, needed);
       const patch = this.patches.get(t);
-      if (patch == null) continue; // below the loaded history
+      if (patch == null) {
+        if (needed) value = true;
+        continue;
+      }
       const state = this.snapshotState(patch);
       if (state === "use") continue;
-      if (state === "bad" && patch.patch == null) value = true;
-      stack.push(...(patch.parents ?? []));
+      if (state === "bad" && patch.patch == null) {
+        value = true;
+        continue;
+      }
+      const below = needed || state === "bad";
+      for (const parent of patch.parents ?? []) stack.push({ t: parent, needed: below });
     }
     this.unavailableCache = { revision: this.revisionCount, value };
     return value;

@@ -60,11 +60,19 @@ export class Session extends EventEmitter {
   private undoPtr = 0;
   private unsubscribe?: () => void;
   private fileUnsubscribe?: () => void;
-  private pendingWrite?: Promise<void>;
+  // Whether flushFileQueue is running. Set and cleared by the flush itself:
+  // it can finish synchronously (when nothing needs writing), and a flag set
+  // by the caller after it returned would then never be cleared.
+  private flushingFile = false;
   private dirtyDoc?: Document;
   private writingDoc?: Document;
   private persistedContent?: string;
   private suppressFileChanges = 0;
+  // While the value is unavailable (see isValueAvailable) nothing is written
+  // to the file, which then holds `heldFileContent` (undefined if unknown).
+  private fileWritesHeld = false;
+  private heldFileContent?: string;
+  private resumingFileSync?: Promise<void>;
   private hasMoreHistory = false;
   private cursorTtlMs = 60_000;
   private cursorStates: Map<string, CursorSnapshot> = new Map();
@@ -108,8 +116,18 @@ export class Session extends EventEmitter {
     this.committedDoc = this.graph.value();
     this.doc = this.committedDoc;
     if (this.fileAdapter && this.doc) {
-      // Track current doc string so we can skip redundant writes.
-      this.persistedContent = this.codec.toString(this.doc);
+      if (this.graph.valueUnavailable()) {
+        // The best-effort value is not what the file holds.
+        this.fileWritesHeld = true;
+        try {
+          this.heldFileContent = await this.fileAdapter.read();
+        } catch {
+          this.heldFileContent = undefined;
+        }
+      } else {
+        // Track current doc string so we can skip redundant writes.
+        this.persistedContent = this.codec.toString(this.doc);
+      }
     }
     this.emit("change", this.doc);
     this.unsubscribe = this.patchStore.subscribe((env) => {
@@ -500,8 +518,47 @@ export class Session extends EventEmitter {
 
     // If a file adapter is present, keep it in sync
     if (this.fileAdapter && this.doc) {
+      if (this.graph.valueUnavailable()) {
+        // Never persist a best-effort value: the file keeps what it has.
+        if (!this.fileWritesHeld) {
+          this.fileWritesHeld = true;
+          this.heldFileContent = this.persistedContent;
+        }
+        return;
+      }
+      if (this.fileWritesHeld) {
+        this.resumingFileSync ??= this.resumeFileSync().finally(() => {
+          this.resumingFileSync = undefined;
+        });
+        return;
+      }
       this.queueFileWriteDoc(liveDoc);
     }
+  }
+
+  // The value became available again: the file still holds what it held
+  // when writes were held, unless someone edited it meanwhile. Such an edit
+  // is ingested like any external edit; otherwise the value is written.
+  private async resumeFileSync(): Promise<void> {
+    let text: string | undefined;
+    try {
+      text = await this.fileAdapter!.read();
+    } catch {
+      text = undefined;
+    }
+    if (!this.fileWritesHeld || this.graph.valueUnavailable()) return;
+    this.fileWritesHeld = false;
+    const held = this.heldFileContent;
+    this.heldFileContent = undefined;
+    this.persistedContent = text;
+    if (text !== undefined && held !== undefined && text !== held && this.doc) {
+      const fileDoc = this.codec.fromString(text);
+      if (!this.doc.isEqual(fileDoc)) {
+        await this.applyExternalDoc(fileDoc);
+        return;
+      }
+    }
+    if (this.doc) this.queueFileWriteDoc(this.doc);
   }
 
   // List local patch times that should be excluded (undo region).
@@ -589,6 +646,8 @@ export class Session extends EventEmitter {
   // React to filesystem changes by ingesting external content.
   private async handleFileChange(): Promise<void> {
     if (!this.doc || !this.fileAdapter) return;
+    // Compared with the held content when writes resume.
+    if (this.fileWritesHeld) return;
     if (this.suppressFileChanges > 0) {
       this.suppressFileChanges -= 1;
       return;
@@ -642,12 +701,13 @@ export class Session extends EventEmitter {
     if (this.writingDoc && this.writingDoc.isEqual(doc)) return;
     if (this.dirtyDoc && this.dirtyDoc.isEqual(doc)) return;
     this.dirtyDoc = doc;
-    if (this.pendingWrite) return;
-    this.pendingWrite = this.flushFileQueue();
+    if (this.flushingFile) return;
+    void this.flushFileQueue();
   }
 
   // Sequentially write queued content to the file adapter with base hints.
   private async flushFileQueue(): Promise<void> {
+    this.flushingFile = true;
     while (this.dirtyDoc !== undefined) {
       const doc = this.dirtyDoc;
       this.dirtyDoc = undefined;
@@ -672,6 +732,6 @@ export class Session extends EventEmitter {
         this.writingDoc = undefined;
       }
     }
-    this.pendingWrite = undefined;
+    this.flushingFile = false;
   }
 }

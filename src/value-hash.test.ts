@@ -2,6 +2,7 @@ import { Session } from "./session";
 import { PatchGraph } from "./patch-graph";
 import { StringCodec, StringDocument } from "./string-document";
 import { MemoryPatchStore } from "./adapters/memory-patch-store";
+import { MemoryFileAdapter } from "./adapters/memory-file-adapter";
 import { mergeStrings3 } from "./merge3";
 import { legacyPatchId } from "./patch-id";
 import { hashString, sameHashFormat } from "./value-hash";
@@ -268,5 +269,91 @@ describe("value hashes", () => {
     expect(reports.map((e) => [e.kind, e.time])).toEqual([["patch", t1]]);
     g.value({ time: t1 });
     expect(reports.length).toBe(1);
+  });
+
+  describe("recovering from a rejected snapshot of a patch with ancestors", () => {
+    // root: "base\n"; child: "base\nsecond\n"; the snapshot of child is bad.
+    const [t1, t2] = [1, 2].map(legacyPatchId);
+    const root = {
+      time: t1,
+      parents: [],
+      patch: doc("").makePatch(doc("base\n")),
+      hash: hashString("base\n"),
+    };
+    const child = {
+      time: t2,
+      parents: [t1],
+      patch: doc("base\n").makePatch(doc("base\nsecond\n")),
+      hash: hashString("base\nsecond\n"),
+    };
+    const badSnapshot = {
+      time: t2,
+      parents: [],
+      isSnapshot: true,
+      snapshot: "BAD\n",
+      hash: hashString("base\nsecond\n"),
+    };
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+    it("refuses commits until the snapshot's patch and all its ancestors are loaded", async () => {
+      const s = await session(new MemoryPatchStore([badSnapshot]), "c", []);
+      expect(s.isValueAvailable()).toBe(false);
+      // Review of #13: the patch alone made the value look available.
+      s.applyRemoteBatch([child]);
+      expect(s.isValueAvailable()).toBe(false);
+      expect(s.needsMoreHistory()).toBe(true);
+      expect(() => s.commit(doc("edit\n"))).toThrow(/load more history/);
+      s.applyRemoteBatch([root]);
+      expect(s.isValueAvailable()).toBe(true);
+      expect(s.getDocument().toString()).toBe("base\nsecond\n");
+      const env = s.commit(doc("base\nsecond\nedit\n"));
+      expect(env.hash).toBe(hashString("base\nsecond\nedit\n"));
+      s.close();
+    });
+
+    it("never writes an unavailable value to the file", async () => {
+      // Review of #13: loading only the root wrote "base\n" over the file.
+      const file = new MemoryFileAdapter("base\nsecond\n");
+      const s = new Session({
+        codec: exactCodec,
+        patchStore: new MemoryPatchStore([badSnapshot]),
+        clientId: "f",
+        fileAdapter: file,
+      });
+      await s.init();
+      s.applyRemoteBatch([root]);
+      await settle();
+      expect(s.isValueAvailable()).toBe(false);
+      expect(await file.read()).toBe("base\nsecond\n");
+      s.applyRemoteBatch([child]);
+      await settle();
+      expect(s.isValueAvailable()).toBe(true);
+      expect(await file.read()).toBe("base\nsecond\n");
+      // Writes resume once the value is known.
+      s.commit(doc("base\nsecond\nthird\n"));
+      await settle();
+      expect(await file.read()).toBe("base\nsecond\nthird\n");
+      s.close();
+    });
+
+    it("ingests an external edit of the file made while the value was unavailable", async () => {
+      const file = new MemoryFileAdapter("base\nsecond\n");
+      const s = new Session({
+        codec: exactCodec,
+        patchStore: new MemoryPatchStore([badSnapshot]),
+        clientId: "e",
+        fileAdapter: file,
+      });
+      await s.init();
+      await file.write("base\nsecond\nexternal\n");
+      await settle();
+      expect(s.isValueAvailable()).toBe(false);
+      s.applyRemoteBatch([root, child]);
+      await settle();
+      expect(s.isValueAvailable()).toBe(true);
+      expect(s.getDocument().toString()).toBe("base\nsecond\nexternal\n");
+      expect(await file.read()).toBe("base\nsecond\nexternal\n");
+      s.close();
+    });
   });
 });
