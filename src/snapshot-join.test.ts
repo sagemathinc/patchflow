@@ -17,7 +17,8 @@ import { PatchGraph } from "./patch-graph";
 import { encodePatchId, comparePatchId } from "./patch-id";
 import { mergeStrings3 } from "./merge3";
 import { StringDocument } from "./string-document";
-import type { DocCodec, Patch } from "./types";
+import { hashString } from "./value-hash";
+import type { DocCodec, Inconsistency, Patch } from "./types";
 
 const exactCodec: DocCodec = {
   fromString: (s) => new StringDocument(s),
@@ -48,7 +49,11 @@ function session(seed: number, codec: DocCodec) {
   const rng = () => (s = (s * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
   const nClients = 3;
   const stream: Patch[] = []; // server append order
-  const graphs = Array.from({ length: nClients }, () => new PatchGraph({ codec }));
+  // Every client checks the values it computes against the hashes their
+  // authors recorded.
+  const inconsistencies: Inconsistency[] = [];
+  const onInconsistency = (e: Inconsistency) => inconsistencies.push(e);
+  const graphs = Array.from({ length: nClients }, () => new PatchGraph({ codec, onInconsistency }));
   const outbox: Patch[][] = Array.from({ length: nClients }, () => []);
   const offlineUntil = Array(nClients).fill(0);
   let clock = 1_000_000;
@@ -104,6 +109,7 @@ function session(seed: number, codec: DocCodec) {
         ? g.value().makePatch(codec.fromString(after))
         : codec.fromString("").makePatch(codec.fromString(after)),
       userId: c,
+      hash: codec.merge3 ? hashString(after) : undefined,
     };
     g.add([patch]);
     if (online) append(patch);
@@ -149,11 +155,12 @@ function session(seed: number, codec: DocCodec) {
           snapshotSeq.set(t, seq);
           // Like CoCalc's snapshot records: the value only, without the
           // patch or its parents.
-          const { wall, userId } = g.getPatch(t);
+          const { wall, userId, hash } = g.getPatch(t);
           append({
             time: t,
             wall,
             userId,
+            hash,
             parents: [],
             isSnapshot: true,
             snapshot: g.value({ time: t }).toString(),
@@ -181,7 +188,7 @@ function session(seed: number, codec: DocCodec) {
     (a, b) => snapshotSeq.get(a)! - snapshotSeq.get(b)!,
   );
   if (snapTimes.length > 0) {
-    const g = new PatchGraph({ codec });
+    const g = new PatchGraph({ codec, onInconsistency });
     const snapshotRecord = (t: string) => stream.find((p) => p.time === t && p.isSnapshot)!;
     let k = snapTimes.length - 1;
     let from = snapshotSeq.get(snapTimes[k])!;
@@ -205,7 +212,7 @@ function session(seed: number, codec: DocCodec) {
     }
     late = g.value().toString();
   }
-  return { values, late, snapshots: snapTimes.length, extraLoads };
+  return { values, late, snapshots: snapTimes.length, extraLoads, inconsistencies };
 }
 
 describe("loading from a snapshot", () => {
@@ -230,6 +237,11 @@ describe("loading from a snapshot", () => {
         if (new Set(r.values).size !== 1) {
           report[name].diverged++;
           if (name === "exact") failures.push(`seed ${seed}: full-history clients diverged`);
+        }
+        if (name === "exact" && r.inconsistencies.length > 0) {
+          failures.push(
+            `seed ${seed}: ${r.inconsistencies.length} values differ from their hashes`,
+          );
         }
         if (r.late != null && r.late !== r.values[0]) {
           report[name].late++;
