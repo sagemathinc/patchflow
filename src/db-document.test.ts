@@ -141,3 +141,31 @@ describe.each(backends)("%s DbDocument", ({ name, codec }) => {
     });
   }
 });
+
+describe.each([
+  { name: "immutable", codec: () => createDbCodec({ primaryKeys: ["type", "id"] }) },
+  { name: "immer", codec: () => createImmerDbCodec({ primaryKeys: ["type", "id"] }) },
+])("%s DbDocument with a composite primary key", ({ codec }) => {
+  // Like a notebook: one key field (type) is shared by most records.
+  const rows = [
+    { type: "settings", id: "main", kernel: "python3" },
+    ...Array.from({ length: 50 }, (_, i) => ({ type: "cell", id: `c${i}`, input: `x = ${i}` })),
+    { type: "output", id: "c7", n: 1 },
+  ];
+  const doc = () =>
+    codec().fromString(rows.map((r) => JSON.stringify(r)).join("\n")) as unknown as TestDoc;
+
+  it("finds the record matching every key field", () => {
+    const d = doc();
+    const one = (where: object) => {
+      // An immutable Map, or a plain object for immer.
+      const r = d.getOne(where) as { toJS?: () => unknown } | undefined;
+      return r?.toJS ? r.toJS() : r;
+    };
+    expect(one({ type: "cell", id: "c7" })).toEqual({ type: "cell", id: "c7", input: "x = 7" });
+    expect(one({ type: "output", id: "c7" })).toEqual({ type: "output", id: "c7", n: 1 });
+    expect(one({ id: "main", type: "settings" })).toEqual(rows[0]);
+    expect(one({ type: "output", id: "c8" })).toBeUndefined();
+    expect(one({ type: "nothing", id: "c7" })).toBeUndefined();
+  });
+});

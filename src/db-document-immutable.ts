@@ -17,7 +17,6 @@ import {
   deepEqual,
   isArray,
   isObject,
-  len,
   mapMergePatch,
   mergeSet,
   nonnullCols,
@@ -452,8 +451,7 @@ export class DbDocument implements Document {
     if (ImMap.isMap(where)) {
       where = where.toJS();
     }
-    const n = len(where as JsMap);
-    let result: ImSet<number> | undefined;
+    const matches: ImSet<number>[] = [];
     for (const field in where) {
       const value = (where as JsMap)[field];
       const index = this.indexes.get(field);
@@ -464,15 +462,17 @@ export class DbDocument implements Document {
       if (v == null) {
         return ImSet();
       }
-      if (n === 1) {
-        return v;
-      }
-      result = result != null ? result.intersect(v) : v;
+      matches.push(v);
     }
-    if (result == null) {
+    if (matches.length === 0) {
       return this.everything;
     }
-    return result;
+    // Filter the smallest set by the others: a key field shared by many
+    // records (e.g. a type) must not make every lookup cost that many.
+    matches.sort((a, b) => a.size - b.size);
+    const [smallest, ...rest] = matches;
+    if (rest.length === 0) return smallest;
+    return smallest.filter((n) => rest.every((v) => v.has(n)));
   }
 
   // Separate primary-key and non-key fields.
