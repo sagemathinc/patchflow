@@ -6,6 +6,7 @@ export * from "./patch-id";
 export * from "./patch-utils";
 export * from "./patch-graph";
 export * from "./string-document";
+export * from "./value-hash";
 export * from "./session";
 export * from "./adapters/memory-patch-store";
 export * from "./adapters/memory-file-adapter";

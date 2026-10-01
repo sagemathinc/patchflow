@@ -8,6 +8,7 @@
  * - Patches are compact array forms: [-1, deletes, 1, adds/updates], mirroring legacy syncdb.
  * - A codec factory wires primary keys + string columns into the patchflow DocCodec interface.
  */
+import { hashRecords } from "./value-hash";
 import { List, Map as ImMap, Set as ImSet, fromJS } from "immutable";
 import { applyPatch as applyStringPatch, makePatch as makeStringPatch } from "./dmp";
 import type { CompressedPatch } from "./dmp";
@@ -76,6 +77,11 @@ export class DbDocument implements Document {
   public toString(): string {
     const obj = this.get({}).toJS() as JsMap[];
     return toStr(obj);
+  }
+
+  // Independent of the order of records and of keys within them.
+  public hash(): string {
+    return hashRecords(this.records, (r) => (r as any).toJS());
   }
 
   // Check equality by comparing record contents.

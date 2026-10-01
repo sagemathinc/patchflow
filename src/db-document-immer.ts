@@ -7,6 +7,7 @@
  * - Patches use the legacy syncdb array form: [-1, deletes, 1, adds/updates].
  * - A codec factory wires primary keys + string columns into the patchflow DocCodec interface.
  */
+import { hashRecords } from "./value-hash";
 import { enableMapSet, produce, type Draft } from "immer";
 import { applyPatch as applyStringPatch, makePatch as makeStringPatch } from "./dmp";
 import type { CompressedPatch } from "./dmp";
@@ -69,6 +70,11 @@ export class DbDocumentImmer implements Document {
   public toString(): string {
     const obj = this.get({}) as JsMap[];
     return toStr(obj);
+  }
+
+  // Independent of the order of records and of keys within them.
+  public hash(): string {
+    return hashRecords(this.records as Iterable<object | undefined>);
   }
 
   // Check equality by primary-key/value contents.

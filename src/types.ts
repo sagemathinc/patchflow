@@ -36,6 +36,23 @@ export interface Patch {
   meta?: { [key: string]: JSONValue };
   // Optional transport provenance.
   source?: string;
+  // Hash of the document value right after this patch, as its author
+  // computed it (see value-hash.ts). Every client that computes the exact value
+  // of this patch must get the same hash; a difference is an inconsistency
+  // (see PatchGraphOptions.onInconsistency). A snapshot record carries the
+  // hash of the patch it is a snapshot of.
+  hash?: string;
+}
+
+// A value that does not match the hash its author recorded (Patch.hash).
+export interface Inconsistency {
+  // "patch": the exact value of a patch; "snapshot": a snapshot's text, the
+  // starting point of values computed from it.
+  kind: "patch" | "snapshot";
+  time: PatchId;
+  expected: string;
+  actual: string;
+  userId?: number;
 }
 
 // Immutable document contract used by the patch graph.
@@ -52,6 +69,8 @@ export interface Document {
   changes?(prev?: Document): unknown;
   size?(): number;
   count(): number;
+  // Hash of the value (see value-hash.ts); by default the hash of toString().
+  hash?(): string;
 }
 
 export interface DocCodec {
@@ -69,6 +88,9 @@ export interface DocCodec {
   // then passed as `ancestors`, so content they already had is not mistaken for
   // new content added by both sides.
   merge3?(base: Document, a: Document, b: Document, ancestors?: Document[]): Document;
+  // Hash of a value (see value-hash.ts); by default doc.hash(), or the hash of
+  // toString(doc). Must be the same for equal values on every client.
+  hash?(doc: Document): string;
 }
 
 export type MergeStrategy = "apply-all" | "three-way";

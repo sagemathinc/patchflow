@@ -1,7 +1,15 @@
 import { List, Map } from "immutable";
 import { LRUCache } from "lru-cache";
 import { comparePatchId, decodePatchId } from "./patch-id";
-import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions } from "./types";
+import type {
+  DocCodec,
+  Document,
+  Inconsistency,
+  MergeStrategy,
+  Patch,
+  PatchGraphValueOptions,
+} from "./types";
+import { hashString, sameHashFormat } from "./value-hash";
 
 type PatchMap = Map<string, Patch>;
 
@@ -22,6 +30,11 @@ export type PatchGraphOptions = {
   valueCacheMaxSize?: number;
   exactCacheMaxEntries?: number;
   exactCacheMaxSize?: number;
+  // Called when an exact value does not match the hash its author recorded
+  // (Patch.hash): this client and the author disagree about the document.
+  // Values computed by the apply-all fallback are approximations and are not
+  // checked.
+  onInconsistency?: (inconsistency: Inconsistency) => void;
 };
 
 function docSize(value: { doc: Document }): number {
@@ -81,9 +94,14 @@ export class PatchGraph {
   // Incremented whenever the graph changes in a way that can change values:
   // new patches, or a snapshot record upgraded with its patch (see add).
   private revisionCount = 0;
+  private onInconsistency?: (inconsistency: Inconsistency) => void;
+  // Patches whose value has been checked against their hash: true if it
+  // matched. A value is checked once, the first time it is computed.
+  private hashChecked = new globalThis.Map<string, boolean>();
 
   constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
+    this.onInconsistency = opts.onInconsistency;
     const exactMax = opts.exactCacheMaxEntries ?? DEFAULT_EXACT_CACHE_MAX_ENTRIES;
     const exactMaxSize = opts.exactCacheMaxSize ?? DEFAULT_EXACT_CACHE_MAX_SIZE;
     const exactOpts = { max: exactMax, maxSize: exactMaxSize, sizeCalculation: docSize };
@@ -679,7 +697,59 @@ export class PatchGraph {
     return doc;
   }
 
+  // Hash of a value (see value-hash.ts).
+  hashOf(doc: Document): string {
+    if (this.codec.hash) return this.codec.hash(doc);
+    if (typeof doc.hash === "function") return doc.hash();
+    return hashString(this.codec.toString(doc));
+  }
+
+  // The exact merged value of a set of patches (e.g. the parents of a new
+  // patch), or undefined if it cannot be computed from the loaded history or
+  // the graph does not compute exact values.
+  exactValueOf(times: string[]): Document | undefined {
+    if (this.codec.merge3 == null || this.mergeStrategy === "apply-all") return undefined;
+    if (times.length === 0) return this.codec.fromString("");
+    return this.exactValueOfSet(times);
+  }
+
+  // Whether this client's exact value of a patch matches the hash its author
+  // recorded: "ok", "mismatch" (also reported to onInconsistency), or
+  // "unknown" if the patch has no hash or the exact value cannot be computed.
+  verifyValue(time: string): "ok" | "mismatch" | "unknown" {
+    const patch = this.patches.get(time);
+    if (patch?.hash == null) return "unknown";
+    const doc = this.exactValueOf([time]);
+    if (doc == null) return "unknown";
+    const ok = this.checkHash(patch, doc);
+    return ok == null ? "unknown" : ok ? "ok" : "mismatch";
+  }
+
+  // Compare a computed value with the patch's hash, once per patch; report a
+  // mismatch. Undefined if there is nothing to compare.
+  private checkHash(patch: Patch, doc: Document): boolean | undefined {
+    const expected = patch.hash;
+    if (expected == null) return undefined;
+    const known = this.hashChecked.get(patch.time);
+    if (known != null) return known;
+    const actual = this.hashOf(doc);
+    if (!sameHashFormat(expected, actual)) return undefined;
+    const ok = actual === expected;
+    this.hashChecked.set(patch.time, ok);
+    if (!ok) {
+      this.onInconsistency?.({
+        kind: patch.isSnapshot && patch.snapshot != null ? "snapshot" : "patch",
+        time: patch.time,
+        expected,
+        actual,
+        userId: patch.userId,
+      });
+    }
+    return ok;
+  }
+
   private clearExactCaches(): void {
+    this.hashChecked.clear();
     this.exactCache.clear();
     this.exactMergeCache.clear();
     this.recentExact.clear();
@@ -753,6 +823,12 @@ export class PatchGraph {
       }
       computed.set(t, doc);
       this.exactCache.set(t, { doc });
+      // Check the requested value, and a snapshot's text, which every value
+      // computed from it builds on. (Intermediate values are checked when they
+      // are requested themselves, e.g. as heads, to keep loading cheap.)
+      if (t === time || (patch.isSnapshot && patch.snapshot != null)) {
+        this.checkHash(patch, doc);
+      }
       for (const parent of parents) release(parent);
     }
     const doc = get(time);

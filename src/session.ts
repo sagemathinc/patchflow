@@ -87,7 +87,10 @@ export class Session extends EventEmitter {
     this.docId = opts.docId;
     this.fileAdapter = opts.fileAdapter;
     this.presenceAdapter = opts.presenceAdapter;
-    this.graph = new PatchGraph({ codec: this.codec });
+    this.graph = new PatchGraph({
+      codec: this.codec,
+      onInconsistency: (inconsistency) => this.emit("inconsistency", inconsistency),
+    });
     const factory = opts.clientIdFactory ?? makeClientId;
     this.clientId = opts.clientId ?? factory();
   }
@@ -166,6 +169,19 @@ export class Session extends EventEmitter {
   isCut(time: string): boolean {
     this.ensureInitialized();
     return this.graph.isCut(time);
+  }
+
+  // Whether this client's exact value of a patch matches the hash its author
+  // recorded (see PatchGraph.verifyValue); e.g. check before writing a
+  // snapshot of it.
+  verifyValue(time: string): "ok" | "mismatch" | "unknown" {
+    this.ensureInitialized();
+    return this.graph.verifyValue(time);
+  }
+
+  // Hash of a value, as stored in Patch.hash.
+  hashOf(doc: Document): string {
+    return this.graph.hashOf(doc);
   }
 
   // Return patch ids (versions) in ascending order.
@@ -275,7 +291,13 @@ export class Session extends EventEmitter {
     if (!this.committedDoc) {
       throw new Error("session not initialized");
     }
-    const base = this.workingCopy?.base ?? this.committedDoc;
+    const parents = this.graph.getValueHeads();
+    // With exact values, make the patch against the exact value of its
+    // parents, which is what every client applies it to; then the history
+    // records exactly nextDoc. (The committed document can differ from it,
+    // e.g. after undo, which hides patches that are still parents.)
+    const parentsValue = this.graph.exactValueOf(parents);
+    const base = parentsValue ?? this.workingCopy?.base ?? this.committedDoc;
     const patch = this.codec.makePatch(base, nextDoc);
     const timeMs = this.nextTimeMs();
     const time = encodePatchId(timeMs, this.clientId);
@@ -284,12 +306,13 @@ export class Session extends EventEmitter {
       time,
       wall: this.clock(),
       patch,
-      parents: this.graph.getValueHeads(),
+      parents,
       userId: this.userId,
       version: nextVersion,
       file: opts.file,
       source: opts.source,
       meta: opts.meta,
+      hash: parentsValue == null ? undefined : this.graph.hashOf(nextDoc),
     };
     this.graph.add([envelope]);
     this.maxVersion = Math.max(this.maxVersion, nextVersion);
@@ -565,7 +588,10 @@ export class Session extends EventEmitter {
   // Convert external doc changes into a patch and append it.
   private async applyExternalDoc(newDoc: Document): Promise<void> {
     if (!this.doc) return;
-    const patch = this.doc.makePatch(newDoc);
+    const parents = this.graph.getValueHeads();
+    // Against the exact value of the parents, as in commit().
+    const parentsValue = this.graph.exactValueOf(parents);
+    const patch = (parentsValue ?? this.doc).makePatch(newDoc);
     const timeMs = this.nextTimeMs();
     const time = encodePatchId(timeMs, this.clientId);
     const nextVersion = Math.max(this.maxVersion + 1, this.graph.versions().length + 1);
@@ -573,10 +599,11 @@ export class Session extends EventEmitter {
       time,
       wall: this.clock(),
       patch,
-      parents: this.graph.getValueHeads(),
+      parents,
       userId: this.userId,
       version: nextVersion,
       file: true,
+      hash: parentsValue == null ? undefined : this.graph.hashOf(newDoc),
     };
     this.graph.add([envelope]);
     this.maxVersion = Math.max(this.maxVersion, nextVersion);
