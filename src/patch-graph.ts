@@ -17,9 +17,8 @@ const DEFAULT_DEDUP_TOLERANCE = 3000;
 const DEFAULT_VALUE_CACHE_MAX_ENTRIES = 100;
 const DEFAULT_VALUE_CACHE_MAX_SIZE = 10_000_000;
 const DEFAULT_EXACT_CACHE_MAX_ENTRIES = 2000;
-// Bound on the total size (doc.size()) of cached exact values, like the value
-// cache: a long history of a large text would otherwise keep thousands of full
-// copies of it.
+// Bound on the total size (see docSize) of cached exact values: a long history
+// of a large text would otherwise keep thousands of full copies of it.
 const DEFAULT_EXACT_CACHE_MAX_SIZE = 10_000_000;
 const RECENT_EXACT_ENTRIES = 8;
 
@@ -37,9 +36,14 @@ export type PatchGraphOptions = {
   onInconsistency?: (inconsistency: Inconsistency) => void;
 };
 
+// Size of a cached exact value: characters of a text, records of a database
+// document. Not doc.size(), which estimates a database document's JSONL text:
+// cached versions of one share their unchanged records, so that would count
+// each about a thousand times over and leave room for only a few dozen
+// values, fewer than merging a wide concurrent history needs.
 function docSize(value: { doc: Document }): number {
   const doc = value?.doc as any;
-  const size = doc?.size?.() ?? doc?.count?.();
+  const size = doc?.count?.() ?? doc?.size?.();
   return Number.isFinite(size) && size > 0 ? Math.ceil(size) : 1;
 }
 
@@ -90,6 +94,12 @@ export class PatchGraph {
   private recentExact = new globalThis.Map<string, Document>();
   // Likewise the most recent merged values of patch sets (e.g. concurrent heads).
   private recentMerged = new globalThis.Map<string, Document>();
+  // Values requested during the outermost exact computation (see pinExact).
+  // The size bounded caches can evict a value while a merge of a wide
+  // criss-cross history still needs it; recomputing it there repeats the
+  // whole merge recursion below it, which grows exponentially.
+  private pinnedExact?: globalThis.Map<string, Document>;
+  private pinnedMerged?: globalThis.Map<string, Document>;
   private waitingCache?: Set<string>;
   // Incremented whenever the graph changes in a way that can change values:
   // new patches, or a snapshot record upgraded with its patch (see add).
@@ -829,9 +839,31 @@ export class PatchGraph {
   // its parents, or the snapshot text of a snapshot. Returns undefined if a
   // needed patch is missing. Computed iteratively, parents first.
   private exactValue(time: string): Document | undefined {
+    return this.pinExact(() => this.computeExactValue(time));
+  }
+
+  // Run an exact computation, keeping every value it requests from
+  // exactValue and exactValueOfSet until the outermost one returns, so each
+  // is computed at most once per computation whatever the cache limits.
+  // Intermediate values of a single exactValue walk are not pinned: they are
+  // released as the walk proceeds, so a long history is not held at once.
+  private pinExact<T>(f: () => T): T {
+    if (this.pinnedExact != null) return f();
+    this.pinnedExact = new globalThis.Map();
+    this.pinnedMerged = new globalThis.Map();
+    try {
+      return f();
+    } finally {
+      this.pinnedExact = undefined;
+      this.pinnedMerged = undefined;
+    }
+  }
+
+  private computeExactValue(time: string): Document | undefined {
     // A requested value is checked against its hash even when it was
     // computed earlier as an intermediate value, which is not checked.
-    const hit = this.recentExact.get(time) ?? this.exactCache.get(time)?.doc;
+    const hit =
+      this.pinnedExact?.get(time) ?? this.recentExact.get(time) ?? this.exactCache.get(time)?.doc;
     if (hit) {
       const patch = this.patches.get(time);
       if (patch != null && this.snapshotState(patch) !== "use") this.checkHash(patch, hit);
@@ -844,7 +876,10 @@ export class PatchGraph {
     const computed = new globalThis.Map<string, Document>();
     const uses = new globalThis.Map<string, number>([[time, 1]]);
     const get = (t: string) =>
-      computed.get(t) ?? this.recentExact.get(t) ?? this.exactCache.get(t)?.doc;
+      computed.get(t) ??
+      this.pinnedExact?.get(t) ??
+      this.recentExact.get(t) ??
+      this.exactCache.get(t)?.doc;
     const order: string[] = [];
     const visited = new Set<string>();
     const stack: { t: string; expanded: boolean }[] = [{ t: time, expanded: false }];
@@ -856,7 +891,8 @@ export class PatchGraph {
       }
       if (visited.has(t)) continue;
       visited.add(t);
-      const hit = this.recentExact.get(t) ?? this.exactCache.get(t)?.doc;
+      const hit =
+        this.pinnedExact?.get(t) ?? this.recentExact.get(t) ?? this.exactCache.get(t)?.doc;
       if (hit) {
         computed.set(t, hit);
         continue;
@@ -910,7 +946,10 @@ export class PatchGraph {
       for (const parent of parents) release(parent);
     }
     const doc = get(time);
-    if (doc != null) remember(this.recentExact, time, doc);
+    if (doc != null) {
+      remember(this.recentExact, time, doc);
+      this.pinnedExact?.set(time, doc);
+    }
     return doc;
   }
 
@@ -921,13 +960,28 @@ export class PatchGraph {
     times: string[],
     get: (t: string) => Document | undefined = () => undefined,
   ): Document | undefined {
+    return this.pinExact(() => this.computeExactValueOfSet(times, get));
+  }
+
+  private computeExactValueOfSet(
+    times: string[],
+    get: (t: string) => Document | undefined,
+  ): Document | undefined {
     const sorted = this.sortHeads(Array.from(new Set(times)));
     if (sorted.length === 1) return get(sorted[0]) ?? this.exactValue(sorted[0]);
     const key = sorted.join(",");
+    const pinned = this.pinnedMerged?.get(key);
+    if (pinned) return pinned;
     const recent = this.recentMerged.get(key);
-    if (recent) return recent;
+    if (recent) {
+      this.pinnedMerged?.set(key, recent);
+      return recent;
+    }
     const cached = this.exactMergeCache.get(key);
-    if (cached) return cached.doc;
+    if (cached) {
+      this.pinnedMerged?.set(key, cached.doc);
+      return cached.doc;
+    }
     const merge3 = this.codec.merge3!;
     let acc = get(sorted[0]) ?? this.exactValue(sorted[0]);
     if (acc == null) return undefined;
@@ -942,6 +996,7 @@ export class PatchGraph {
     }
     this.exactMergeCache.set(key, { doc: acc });
     remember(this.recentMerged, key, acc);
+    this.pinnedMerged?.set(key, acc);
     return acc;
   }
 
