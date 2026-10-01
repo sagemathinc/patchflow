@@ -258,4 +258,10 @@ describe("mergeStrings3", () => {
     expect(merge("old\n", "changed\n", "old\ned\n")).toBe("changed\ned\n");
     expect(merge("old\n", "old\ned\n", "changed\n")).toBe("changed\ned\n");
   });
+
+  it("does not take an indent for a line added before the line", () => {
+    // Review of #8: both sides added "new"; one also indented "original".
+    expect(merge("original\n", "new\n  original\n", "new\noriginal\n")).toBe("new\n  original\n");
+    expect(merge("original\n", "new\noriginal\n", "new\n  original\n")).toBe("new\n  original\n");
+  });
 });

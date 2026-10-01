@@ -630,11 +630,14 @@ function keptOf(base: WordProfile, text: WordProfile): number {
 function combineAdjacent(chunk: Chunk, words = false): string | undefined {
   const { base, a, b } = chunk;
   if (base === "") return undefined;
-  // For words, only text added at a word boundary counts as added next to the
-  // base ("hello" -> "hello there", not "hello" -> "helloy").
+  // Only text added at a boundary counts as added next to the base: for
+  // words a word boundary ("hello" -> "hello there", not "hello" -> "helloy"),
+  // for lines a line break ("x" -> "new\nx", not "x" -> "  x", an indent).
   const wordChar = /[\p{L}\p{N}_]/u;
   const joins = (left: string, right: string) =>
-    !words || !wordChar.test(left.slice(-1)) || !wordChar.test(right.slice(0, 1));
+    words
+      ? !wordChar.test(left.slice(-1)) || !wordChar.test(right.slice(0, 1))
+      : left === "" || right === "" || left.endsWith("\n");
   const pre = (x: string) =>
     x.startsWith(base) && joins(base, x.slice(base.length)) ? x.slice(base.length) : undefined; // x = base + y
   const post = (x: string) =>
