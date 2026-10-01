@@ -795,6 +795,7 @@ export class PatchGraph {
     // Patches below a rejected snapshot are needed to compute its value; other
     // missing patches are merely below the loaded history.
     const seen = new globalThis.Map<string, boolean>();
+    const rejected: string[] = [];
     const stack = this.getValueHeads().map((t) => ({ t, needed: false }));
     while (stack.length > 0 && !value) {
       const { t, needed } = stack.pop()!;
@@ -812,8 +813,16 @@ export class PatchGraph {
         value = true;
         continue;
       }
+      if (state === "bad") rejected.push(t);
       const below = needed || state === "bad";
       for (const parent of patch.parents ?? []) stack.push({ t: parent, needed: below });
+    }
+    // Loaded ancestors are not enough: rebuilding a rejected snapshot's value
+    // can also need the common ancestors of its parents (which the walk above
+    // does not follow past valid snapshots). With exact values, require that
+    // each rejected snapshot's value can actually be computed.
+    if (!value && this.codec.merge3 != null) {
+      value = rejected.some((t) => this.exactValue(t) == null);
     }
     this.unavailableCache = { revision: this.revisionCount, value };
     return value;

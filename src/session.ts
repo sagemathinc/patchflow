@@ -73,6 +73,8 @@ export class Session extends EventEmitter {
   private fileWritesHeld = false;
   private heldFileContent?: string;
   private resumingFileSync?: Promise<void>;
+  private resumeRetryTimer?: ReturnType<typeof setTimeout>;
+  private closed = false;
   private hasMoreHistory = false;
   private cursorTtlMs = 60_000;
   private cursorStates: Map<string, CursorSnapshot> = new Map();
@@ -152,6 +154,11 @@ export class Session extends EventEmitter {
 
   // Tear down subscriptions and presence when done.
   close(): void {
+    this.closed = true;
+    if (this.resumeRetryTimer != null) {
+      clearTimeout(this.resumeRetryTimer);
+      this.resumeRetryTimer = undefined;
+    }
     this.unsubscribe?.();
     this.fileUnsubscribe?.();
     this.presenceAdapter?.publish(undefined);
@@ -547,11 +554,20 @@ export class Session extends EventEmitter {
       text = undefined;
     }
     if (!this.fileWritesHeld || this.graph.valueUnavailable()) return;
+    if (text === undefined) {
+      // Without knowing what the file holds now, writing could destroy an
+      // edit made meanwhile: keep holding and try again.
+      this.scheduleResumeRetry();
+      return;
+    }
     this.fileWritesHeld = false;
     const held = this.heldFileContent;
     this.heldFileContent = undefined;
     this.persistedContent = text;
-    if (text !== undefined && held !== undefined && text !== held && this.doc) {
+    // If the file changed while held, or what it held is unknown (its first
+    // read failed), its content may be an external edit: ingest it, which
+    // keeps both versions in the history, rather than overwrite it.
+    if ((held === undefined || text !== held) && this.doc) {
       const fileDoc = this.codec.fromString(text);
       if (!this.doc.isEqual(fileDoc)) {
         await this.applyExternalDoc(fileDoc);
@@ -559,6 +575,18 @@ export class Session extends EventEmitter {
       }
     }
     if (this.doc) this.queueFileWriteDoc(this.doc);
+  }
+
+  private scheduleResumeRetry(): void {
+    if (this.resumeRetryTimer != null) return;
+    this.resumeRetryTimer = setTimeout(() => {
+      this.resumeRetryTimer = undefined;
+      if (!this.fileWritesHeld || this.closed) return;
+      this.resumingFileSync ??= this.resumeFileSync().finally(() => {
+        this.resumingFileSync = undefined;
+      });
+    }, 1000);
+    this.resumeRetryTimer.unref?.();
   }
 
   // List local patch times that should be excluded (undo region).

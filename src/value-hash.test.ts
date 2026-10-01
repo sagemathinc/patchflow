@@ -336,6 +336,65 @@ describe("value hashes", () => {
       s.close();
     });
 
+    it("refuses commits while a rejected merge snapshot's merge base is missing", async () => {
+      // Review of #13: the parents were valid snapshots, but merging them needs
+      // their common ancestor, which was not loaded.
+      const p = (t: number, parents: number[], from: string, to: string) => ({
+        time: legacyPatchId(t),
+        parents: parents.map(legacyPatchId),
+        patch: doc(from).makePatch(doc(to)),
+        hash: hashString(to),
+      });
+      const base = p(1, [], "", "base\n");
+      const a = { ...p(2, [1], "base\n", "A\nbase\n"), isSnapshot: true, snapshot: "A\nbase\n" };
+      const b = { ...p(3, [1], "base\n", "base\nB\n"), isSnapshot: true, snapshot: "base\nB\n" };
+      const merge = {
+        ...p(4, [2, 3], "A\nbase\nB\n", "A\nbase\nB\nC\n"),
+        isSnapshot: true,
+        snapshot: "BAD\n",
+      };
+      const s = await session(new MemoryPatchStore([a, b, merge]), "m", []);
+      expect(s.isValueAvailable()).toBe(false);
+      expect(() => s.commit(doc("edit\n"))).toThrow(/load more history/);
+      s.applyRemoteBatch([base]);
+      expect(s.isValueAvailable()).toBe(true);
+      expect(s.getDocument().toString()).toBe("A\nbase\nB\nC\n");
+      s.close();
+    });
+
+    it.each([1, 2])(
+      "keeps an external edit when file read %i fails during recovery",
+      async (failRead) => {
+        // Review of #13: a failed read cleared the hold and wrote anyway.
+        let disk = "base\nsecond\n";
+        let reads = 0;
+        const s = new Session({
+          codec: exactCodec,
+          patchStore: new MemoryPatchStore([badSnapshot]),
+          clientId: "r",
+          fileAdapter: {
+            read: async () => {
+              if (++reads === failRead) throw new Error("temporary read failure");
+              return disk;
+            },
+            write: async (text: string) => {
+              disk = text;
+            },
+          },
+        });
+        await s.init();
+        disk += "external\n";
+        s.applyRemoteBatch([root, child]);
+        await settle();
+        expect(disk).toBe("base\nsecond\nexternal\n");
+        // Recovery is retried; the edit is then in the document, not lost.
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        expect(disk).toBe("base\nsecond\nexternal\n");
+        expect(s.getDocument().toString()).toBe("base\nsecond\nexternal\n");
+        s.close();
+      },
+    );
+
     it("ingests an external edit of the file made while the value was unavailable", async () => {
       const file = new MemoryFileAdapter("base\nsecond\n");
       const s = new Session({
