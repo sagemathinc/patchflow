@@ -499,6 +499,20 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
   return pairs;
 }
 
+// A region both sides changed, merged word by word if their changes touch
+// different words (for example, one side split a line and the other edited
+// words elsewhere in it), otherwise undefined. Line by line, the split line
+// and the edited line would both be kept, duplicating its text.
+function cleanWordMerge(chunk: Chunk): string | undefined {
+  let clean = true;
+  const merged = diff3(chunk.base, chunk.a, chunk.b, wordDiff, (words) => {
+    const disjoint = disjointWordEdits(words);
+    if (disjoint == null) clean = false;
+    return disjoint ?? words.a;
+  });
+  return clean ? merged : undefined;
+}
+
 // Line-level three-way merge of a region both sides changed. Per base line:
 // kept by both stays; changed by one side takes that change; modified by both
 // is merged word by word; a modification beats a concurrent deletion. Lines
@@ -616,11 +630,14 @@ function keptOf(base: WordProfile, text: WordProfile): number {
 function combineAdjacent(chunk: Chunk, words = false): string | undefined {
   const { base, a, b } = chunk;
   if (base === "") return undefined;
-  // For words, only text added at a word boundary counts as added next to the
-  // base ("hello" -> "hello there", not "hello" -> "helloy").
+  // Only text added at a boundary counts as added next to the base: for
+  // words a word boundary ("hello" -> "hello there", not "hello" -> "helloy"),
+  // for lines a line break ("x" -> "new\nx", not "x" -> "  x", an indent).
   const wordChar = /[\p{L}\p{N}_]/u;
   const joins = (left: string, right: string) =>
-    !words || !wordChar.test(left.slice(-1)) || !wordChar.test(right.slice(0, 1));
+    words
+      ? !wordChar.test(left.slice(-1)) || !wordChar.test(right.slice(0, 1))
+      : left === "" || right === "" || left.endsWith("\n");
   const pre = (x: string) =>
     x.startsWith(base) && joins(base, x.slice(base.length)) ? x.slice(base.length) : undefined; // x = base + y
   const post = (x: string) =>
@@ -643,6 +660,19 @@ function combineAdjacent(chunk: Chunk, words = false): string | undefined {
   if (aPost != null && bPost != null) {
     return both(aPost, bPost, !words && aPost.endsWith("\n") && bPost.endsWith("\n")) + base;
   }
+  // One side added text the other side's change also added there (with the
+  // same text both sides added, for example): keep it once.
+  // Only whole lines (or words) count: "og" added after "cat" is not part of
+  // "dog", which the other side changed "cat" to.
+  const boundary = (x: string) => (words ? /\s/.test(x) : x === "\n");
+  const endsWithAdded = (x: string, added: string) =>
+    x.endsWith(added) && (x.length === added.length || boundary(x[x.length - added.length - 1]));
+  const startsWithAdded = (x: string, added: string) =>
+    x.startsWith(added) && (x.length === added.length || boundary(added[added.length - 1]));
+  if (bPre != null && endsWithAdded(a, bPre)) return a;
+  if (bPost != null && startsWithAdded(a, bPost)) return a;
+  if (aPre != null && endsWithAdded(b, aPre)) return b;
+  if (aPost != null && startsWithAdded(b, aPost)) return b;
   if (bPre != null) return a + bPre;
   if (bPost != null) return bPost + a;
   if (aPre != null) return b + aPre;
@@ -678,7 +708,75 @@ function keepBoth(chunk: Chunk): string {
 // Both sides changed the same words: keep both versions rather than splicing
 // characters of two different edits into a word neither of them typed.
 function mergeWords(words: Chunk): string {
-  return combineAdjacent(words, true) ?? resolveTrivial(words) ?? keepBoth(words);
+  return (
+    combineAdjacent(words, true) ??
+    resolveTrivial(words) ??
+    disjointWordEdits(words) ??
+    keepBoth(words)
+  );
+}
+
+// Both sides changed words of a chunk, but different ones (for example,
+// neighboring words, with no unchanged word between them to split the chunk):
+// apply both sides' edits. Undefined if edits of the two sides overlap
+// (except the same edit made on both sides), or insert text with words in
+// common at one place. Different text both sides inserted at one place is kept
+// in a canonical order, and an insertion just before or after the other
+// side's edit is placed there.
+function disjointWordEdits(chunk: Chunk): string | undefined {
+  const { base } = chunk;
+  const edits = (text: string) => diffToEdits(wordDiff(base, text)).map((e) => trimEdit(base, e));
+  const aEdits = edits(chunk.a);
+  const bEdits: Edit[] = [];
+  for (const e of edits(chunk.b)) {
+    const same = (x: Edit) => x.from === e.from && x.to === e.to && x.insert === e.insert;
+    if (aEdits.some(same)) continue;
+    const both = isInsertion(e) ? aEdits.findIndex((x) => isInsertion(x) && x.from === e.from) : -1;
+    if (both !== -1) {
+      const x = aEdits[both].insert;
+      // Insertions sharing words may be the same text reached by different
+      // paths; the line merge unions those without repeating common lines.
+      if (sharesWord(x, e.insert)) return undefined;
+      const insert = x <= e.insert ? joinAdded(x, e.insert, " ") : joinAdded(e.insert, x, " ");
+      aEdits[both] = { ...e, insert };
+      continue;
+    }
+    const clash = (x: Edit) => {
+      if (isInsertion(x)) return e.from < x.from && x.from < e.to;
+      if (isInsertion(e)) return x.from < e.from && e.from < x.to;
+      return x.from < e.to && e.from < x.to;
+    };
+    if (aEdits.some(clash)) return undefined;
+    bEdits.push(e);
+  }
+  const all = [...aEdits, ...bEdits].sort((x, y) => x.from - y.from || x.to - y.to);
+  return applyEdits(base, all);
+}
+
+function sharesWord(x: string, y: string): boolean {
+  const words = new Set(x.match(/[\p{L}\p{N}_]+/gu) ?? []);
+  return (y.match(/[\p{L}\p{N}_]+/gu) ?? []).some((w) => words.has(w));
+}
+
+// An edit without the whitespace it keeps at its start and end (a replaced
+// word includes the space before it), so it does not overlap a whitespace
+// change next to it, such as a line break the other side typed there.
+function trimEdit(base: string, e: Edit): Edit {
+  let { from, to, insert } = e;
+  while (from < to && insert !== "" && base[from] === insert[0] && /\s/.test(insert[0])) {
+    from++;
+    insert = insert.slice(1);
+  }
+  while (
+    from < to &&
+    insert !== "" &&
+    base[to - 1] === insert[insert.length - 1] &&
+    /\s/.test(base[to - 1])
+  ) {
+    to--;
+    insert = insert.slice(0, -1);
+  }
+  return { from, to, insert };
 }
 
 function resolveTrivial(chunk: Chunk): string | undefined {
@@ -733,7 +831,9 @@ function mergeTerminated(opts: {
     a,
     b,
     lineDiff,
-    withAdjacent((lines) => editUnion(lines, lineDiff, (region) => lineUnion(region))),
+    withAdjacent((lines) =>
+      editUnion(lines, lineDiff, (region) => cleanWordMerge(region) ?? lineUnion(region)),
+    ),
     (text) => text.trim() !== "",
   );
   return ancestors?.length ? dropReappearedLines(merged, [base, ...ancestors], a, b) : merged;
