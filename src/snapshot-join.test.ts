@@ -147,8 +147,14 @@ function session(seed: number, codec: DocCodec) {
         const seq = t == null ? -1 : stream.findIndex((p) => p.time === t);
         if (t != null && seq >= 0 && !snapshotSeq.has(t)) {
           snapshotSeq.set(t, seq);
+          // Like CoCalc's snapshot records: the value only, without the
+          // patch or its parents.
+          const { wall, userId } = g.getPatch(t);
           append({
-            ...g.getPatch(t),
+            time: t,
+            wall,
+            userId,
+            parents: [],
             isSnapshot: true,
             snapshot: g.value({ time: t }).toString(),
           });
@@ -188,7 +194,9 @@ function session(seed: number, codec: DocCodec) {
       k--;
       const to = from;
       from = k >= 0 ? snapshotSeq.get(snapTimes[k])! : 0;
-      const older = stream.slice(from, to).filter((p) => !p.isSnapshot);
+      // Up to and including the patch the newer snapshot is of (in CoCalc,
+      // loading more history loads everything before the loaded range).
+      const older = stream.slice(from, to + 1).filter((p) => !p.isSnapshot);
       g.add(
         k >= 0
           ? [snapshotRecord(snapTimes[k]), ...older.filter((p) => p.time !== snapTimes[k])]
@@ -232,5 +240,47 @@ describe("loading from a snapshot", () => {
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(report));
     expect(failures).toEqual([]);
+  });
+});
+
+describe("a session that receives the snapshotted patch last", () => {
+  it("refreshes its document when only a snapshot record is upgraded", async () => {
+    const { Session } = await import("./session");
+    const { MemoryPatchStore } = await import("./adapters/memory-patch-store");
+    const { legacyPatchId: id } = await import("./patch-id");
+    const doc = (s: string) => new StringDocument(s);
+    const patch = (t: number, parents: number[], from: string, to: string): Patch => ({
+      time: id(t),
+      parents: parents.map(id),
+      patch: doc(from).makePatch(doc(to)),
+    });
+    // t2 and t3 edit t1 concurrently, t4 builds on t2 and is snapshotted, t5
+    // merges t4 and t3.
+    const ps = [
+      patch(1, [], "", "a\nb\nc\n"),
+      patch(2, [1], "a\nb\nc\n", "A\nb\nc\n"),
+      patch(3, [1], "a\nb\nc\n", "a\nb\nC\n"),
+      patch(4, [2], "A\nb\nc\n", "A\nB\nc\n"),
+      patch(5, [4, 3], "A\nB\nC\n", "A\nB\nC\nd\n"),
+    ];
+    const snap: Patch = { time: id(4), parents: [], isSnapshot: true, snapshot: "A\nB\nc\n" };
+    const s = new Session({
+      codec: exactCodec,
+      clientId: "late",
+      patchStore: new MemoryPatchStore([snap, ps[4], ...ps.slice(0, 3)]),
+    });
+    await s.init();
+    let changes = 0;
+    s.on("change", () => changes++);
+    // The patch the snapshot is of arrives last: no new patch, but the value
+    // changes.
+    expect(s.applyRemoteBatch([ps[3]])).toEqual([]);
+    expect(changes).toBe(1);
+    expect(s.getDocument().toString()).toBe("A\nB\nC\nd\n");
+    expect(s.value().toString()).toBe("A\nB\nC\nd\n");
+    // Replaying it again changes nothing.
+    expect(s.applyRemoteBatch([ps[3]])).toEqual([]);
+    expect(changes).toBe(1);
+    s.close();
   });
 });

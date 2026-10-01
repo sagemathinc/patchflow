@@ -78,6 +78,9 @@ export class PatchGraph {
   // Likewise the most recent merged values of patch sets (e.g. concurrent heads).
   private recentMerged = new globalThis.Map<string, Document>();
   private waitingCache?: Set<string>;
+  // Incremented whenever the graph changes in a way that can change values:
+  // new patches, or a snapshot record upgraded with its patch (see add).
+  private revisionCount = 0;
 
   constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
@@ -126,6 +129,40 @@ export class PatchGraph {
             snapshot: patch.snapshot,
             seqInfo: patch.seqInfo ?? existing.seqInfo,
           });
+        } else if (
+          existing.isSnapshot &&
+          existing.patch == null &&
+          !patch.isSnapshot &&
+          patch.patch != null
+        ) {
+          // A snapshot record carries only the value, not the parents: a client
+          // that loaded the document from a snapshot and then loads older history
+          // gets the patch itself here. Without its parents the snapshotted patch
+          // looks like a root, and merges whose common ancestor is below it
+          // (concurrent work) would merge from an empty base, duplicating the
+          // whole document.
+          const upgraded: Patch = {
+            ...patch,
+            parents: patch.parents ?? [],
+            isSnapshot: true,
+            snapshot: existing.snapshot,
+            seqInfo: existing.seqInfo ?? patch.seqInfo,
+          };
+          this.patches = this.patches.set(patch.time, upgraded);
+          for (const parent of upgraded.parents ?? []) {
+            const kids = this.children.get(parent) ?? new Set<string>();
+            kids.add(upgraded.time);
+            this.children = this.children.set(parent, kids);
+          }
+          this.clearExactCaches();
+          this.headsCache = undefined;
+          this.waitingCache = undefined;
+          this.oldestCache = undefined;
+          this.reachabilityCache.clear();
+          this.mergeCache.clear();
+          this.versionsCache = undefined;
+          // Not a new patch, so add() does not return it, but values change.
+          this.revisionCount++;
         }
         continue;
       }
@@ -147,12 +184,20 @@ export class PatchGraph {
       added.push(normalized);
     }
     if (added.length === 0) return added;
+    this.revisionCount++;
     this.updateHeadsAndWaiting(added);
     // Any structural change invalidates cached reachability/versions/merges.
     this.reachabilityCache.clear();
     this.mergeCache.clear();
     this.versionsCache = undefined;
     return added;
+  }
+
+  // Changes whenever values may have changed (see revisionCount); a caller
+  // holding a value computed from the graph recomputes it when this changes,
+  // even if add() returned no new patches.
+  revision(): number {
+    return this.revisionCount;
   }
 
   // Update the cached heads and waiting patches for newly added patches, or

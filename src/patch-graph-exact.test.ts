@@ -345,6 +345,36 @@ describe("PatchGraph exact values (codec with merge3)", () => {
     expect([t3, t4, t5].map((t) => g.isCut(t))).toEqual([true, false, false]);
   });
 
+  it("keeps the parents of a snapshotted patch loaded after its snapshot record", () => {
+    // t1 and t2 are concurrent edits of t0, t3 builds on t1 and is snapshotted,
+    // t4 merges t3 with t2 from their common ancestor t0. A client that opened
+    // the document from the snapshot (a record with the value but no parents)
+    // and then loaded older history must merge from t0, not an empty base.
+    const [t0, t1, t2, t3, t4] = [1, 2, 3, 4, 5].map(legacyPatchId);
+    const v0 = "a\nb\nc\n";
+    const v1 = "A\nb\nc\n";
+    const v2 = "a\nb\nC\n";
+    const v3 = "A\nB\nc\n";
+    const patches = [
+      patch(t0, [], "", v0),
+      patch(t1, [t0], v0, v1),
+      patch(t2, [t0], v0, v2),
+      patch(t3, [t1], v1, v3),
+      patch(t4, [t3, t2], "A\nB\nC\n", "A\nB\nC\nd\n"),
+    ];
+    const full = new PatchGraph({ codec: exactCodec });
+    full.add(patches);
+    expect(full.value().toString()).toBe("A\nB\nC\nd\n");
+
+    const late = new PatchGraph({ codec: exactCodec });
+    late.add([{ time: t3, parents: [], isSnapshot: true, snapshot: v3, userId: 0 }, patches[4]]);
+    expect(late.needsMoreHistory()).toBe(true);
+    late.add(patches.slice(0, 4)); // older history, including t3 itself
+    expect(late.needsMoreHistory()).toBe(false);
+    expect(late.value().toString()).toBe("A\nB\nC\nd\n");
+    expect(late.getParents(t3)).toEqual([t1]);
+  });
+
   it("needs no more history for a gap covered by the current snapshot", () => {
     const [t1, t2, t3, t4] = [1, 2, 3, 4].map(legacyPatchId);
     const g = new PatchGraph({ codec: exactCodec });
