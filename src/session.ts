@@ -367,7 +367,7 @@ export class Session extends EventEmitter {
       source: opts.source,
       meta: opts.meta,
       hash: parentsValue == null ? undefined : this.graph.hashOf(nextDoc),
-      ...(parentsValue == null ? { inexact: true } : {}),
+      ...this.inexactMarker(parentsValue),
       ...this.recordMerge(parents, parentsValue),
     };
     this.graph.add([envelope]);
@@ -404,6 +404,15 @@ export class Session extends EventEmitter {
       if (best == null || size < best.size) best = { parent, patch, size };
     }
     return best == null ? {} : { mergeParent: best.parent, mergePatch: best.patch };
+  }
+
+  // A patch committed without the exact value of its parents by a session
+  // that computes exact values (e.g. before the history needed for it is
+  // loaded) is marked inexact (see Patch.inexact). A session that never
+  // computes exact values (no merge3, or apply-all) writes history the way
+  // patchflow 0.8 did, and its patches are read that way: no marker.
+  private inexactMarker(parentsValue: Document | undefined): Pick<PatchEnvelope, "inexact"> {
+    return parentsValue == null && this.graph.computesExactValues() ? { inexact: true } : {};
   }
 
   // Merge a remote patch and refresh the current document.
@@ -744,7 +753,7 @@ export class Session extends EventEmitter {
       version: nextVersion,
       file: true,
       hash: parentsValue == null ? undefined : this.graph.hashOf(newDoc),
-      ...(parentsValue == null ? { inexact: true } : {}),
+      ...this.inexactMarker(parentsValue),
       ...this.recordMerge(parents, parentsValue),
     };
     this.graph.add([envelope]);

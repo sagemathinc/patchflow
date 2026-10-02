@@ -780,6 +780,13 @@ export class PatchGraph {
     return hashString(this.codec.toString(doc));
   }
 
+  // Whether this graph computes exact values (the codec provides merge3 and
+  // the strategy is not apply-all). Otherwise every value applies all patches
+  // in time order, as patchflow 0.8 did.
+  computesExactValues(): boolean {
+    return this.codec.merge3 != null && this.mergeStrategy !== "apply-all";
+  }
+
   // The exact merged value of a set of patches (e.g. the parents of a new
   // patch), or undefined if it cannot be computed from the loaded history or
   // the graph does not compute exact values.

@@ -66,9 +66,6 @@ async function writers(c: DocCodec, n: number) {
 
 const strip = ({ mergeParent: _p, mergePatch: _m, ...rest }: PatchEnvelope): Patch => rest;
 
-// A patch as patchflow 0.8 wrote it: no inexact marker.
-const as08 = ({ inexact: _inexact, ...rest }: PatchEnvelope): PatchEnvelope => rest;
-
 describe("merge commits record their merged value", () => {
   async function history() {
     const [a, b] = await writers(codec, 2);
@@ -183,10 +180,29 @@ describe("a history written before merge commits recorded their merged value", (
       // Concurrent edits of the same words, which merge differently.
       const k = Math.floor(rng() * words.length);
       words[k] = `${words[k]}${step}`;
-      all.push(as08(s.commit(doc(words.join(" ")))));
+      all.push(s.commit(doc(words.join(" "))));
     }
     return all;
   }
+
+  it("is what a current session without merge3 writes: no inexact marker", async () => {
+    // The reviewer's case: a current apply-all writer, read by exact readers
+    // without changing its envelopes.
+    const [a, b] = await writers(applyAllCodec, 2);
+    const root = a.commit(doc("hello\n"));
+    b.applyRemote(root);
+    const left = a.commit(doc("helloA\n"));
+    const right = b.commit(doc("helloB\n"));
+    a.applyRemote(right);
+    const authored = `${a.getDocument()}tail\n`;
+    const last = a.commit(doc(authored));
+    a.close();
+    b.close();
+    for (const p of [root, left, right, last]) expect(p.inexact).toBeUndefined();
+    for (const c of [codec, otherCodec]) {
+      expect(graph(c, [root, left, right, last]).version(last.time).toString()).toBe(authored);
+    }
+  });
 
   it("keeps the values its authors saw, whatever the merge algorithm", async () => {
     let merges = 0;
@@ -272,7 +288,7 @@ describe("merge commits written before hashes", () => {
       a.applyRemote(r);
       const m = a.commit(doc(`${a.getDocument()}M${i}\n`));
       b.applyRemoteBatch([l, m]);
-      all.push(...[l, r, m].map(as08));
+      all.push(l, r, m);
       values.set(m.time, `${a.getDocument()}`);
     }
     expect(all.filter((p) => (p.parents?.length ?? 0) > 1 && p.hash == null)).toHaveLength(rounds);
@@ -353,7 +369,7 @@ describe("replay checkpoints of a large document", () => {
       a.applyRemote(r);
       const m = a.commit(doc(`${a.getDocument()}M${i}\n`));
       b.applyRemoteBatch([l, m]);
-      all.push(...[l, r, m].map(as08));
+      all.push(l, r, m);
       values.set(m.time, `${a.getDocument()}`);
     }
     let applied = 0;
