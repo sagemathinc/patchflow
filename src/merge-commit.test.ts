@@ -159,8 +159,6 @@ describe("merge commits record their merged value", () => {
   });
 });
 
-const applyAll = { unmarkedMerges: "apply-all" } as const;
-
 describe("a history written before merge commits recorded their merged value", () => {
   // Written by versions that applied every patch in time order: no hashes,
   // merge commits are diffs from that value of their parents.
@@ -194,7 +192,7 @@ describe("a history written before merge commits recorded their merged value", (
       merges += all.filter((p) => (p.parents?.length ?? 0) > 1).length;
       const authored = graph(applyAllCodec, all);
       for (const c of [codec, otherCodec]) {
-        const g = graph(c, all, [], applyAll);
+        const g = graph(c, all);
         for (const p of all) {
           expect(g.version(p.time).toString()).toBe(authored.version(p.time).toString());
         }
@@ -220,7 +218,7 @@ describe("a history written before merge commits recorded their merged value", (
       patch(5, [4, 3], "A\nB\nC\n", "A\nB\nC\nd\n"),
     ];
     const snapshot: Patch = { ...ps[3], isSnapshot: true, snapshot: "A\nB\nc\n" };
-    const g = graph(codec, [...ps.slice(0, 3), snapshot, ps[4]], [], applyAll);
+    const g = graph(codec, [...ps.slice(0, 3), snapshot, ps[4]]);
     expect(g.version(id(5)).toString()).toBe("A\nB\nC\nd\n");
   });
 });
@@ -241,76 +239,8 @@ describe("undo of a merge commit", () => {
   });
 });
 
-describe("unmarked merge commits", () => {
-  // Written by the Session of patchflow 0.9.3 (exact merges, no hashes, no
-  // recorded merged value): two writers append to "hello" concurrently, then
-  // one merges and adds a line. Its author saw "helloA\nhelloB\ntail\n".
-  const authored = "helloA\nhelloB\ntail\n";
-  const written: Patch[] = [
-    { time: "000000000rs_A", parents: [], patch: [[[[1, "hello\n"]], 0, 0, 0, 6]] },
-    {
-      time: "000000000ru_A",
-      parents: ["000000000rs_A"],
-      patch: [
-        [
-          [
-            [0, "hello"],
-            [1, "A"],
-            [0, "\n"],
-          ],
-          0,
-          0,
-          6,
-          7,
-        ],
-      ],
-    },
-    {
-      time: "000000000rw_B",
-      parents: ["000000000rs_A"],
-      patch: [
-        [
-          [
-            [0, "hello"],
-            [1, "B"],
-            [0, "\n"],
-          ],
-          0,
-          0,
-          6,
-          7,
-        ],
-      ],
-    },
-    {
-      time: "000000000ry_A",
-      parents: ["000000000ru_A", "000000000rw_B"],
-      patch: [
-        [
-          [
-            [0, "\nhelloB\n"],
-            [1, "tail\n"],
-          ],
-          6,
-          6,
-          8,
-          13,
-        ],
-      ],
-    },
-  ];
-
-  it("are read with merge3 by default, as patchflow 0.9 wrote them", () => {
-    expect(graph(codec, written).value().toString()).toBe(authored);
-  });
-
-  it("are read as patchflow 0.8 wrote them only when the application says so", () => {
-    // This history was not written that way, so that reading differs: which
-    // one is right is known only to the application.
-    expect(graph(codec, written, [], applyAll).value().toString()).not.toBe(authored);
-  });
-
-  it("read as patchflow 0.8 wrote them, each merge continues the previous replay", async () => {
+describe("merge commits written before hashes", () => {
+  it("each merge continues the previous replay", async () => {
     // Rounds of: fork the last merge, one line on each side, merge. Reading
     // every merge as it arrives applies each patch once, not the whole
     // history again for every merge.
@@ -354,7 +284,7 @@ describe("unmarked merge commits", () => {
         return d.applyPatchBatch(ps);
       },
     };
-    const g = new PatchGraph({ codec: counting, ...applyAll });
+    const g = new PatchGraph({ codec: counting });
     g.add([all[0]]);
     let checked = 0;
     for (let i = 1; i < all.length; i += 3) {

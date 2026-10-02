@@ -35,16 +35,6 @@ export type PatchGraphOptions = {
   // Values computed by the apply-all fallback are approximations and are not
   // checked.
   onInconsistency?: (inconsistency: Inconsistency) => void;
-  // How the value of an unmarked merge commit (several parents, no recorded
-  // merged value, no hash) is computed, which depends on what wrote the
-  // history; only its application knows that:
-  // - "merge3" (default): from the merge3 of its parents, as patchflow 0.9
-  //   wrote it (exact merges, before hashes);
-  // - "apply-all": from every patch its parents descend from applied in time
-  //   order, as versions before exact merges (patchflow 0.8 and earlier)
-  //   wrote it, so such a history keeps the values its authors saw (see
-  //   legacyValueOfSet).
-  unmarkedMerges?: "merge3" | "apply-all";
 };
 
 // Size of a cached exact value: characters of a text, records of a database
@@ -70,10 +60,13 @@ function isRoot(patch: Patch): boolean {
 }
 
 // A merge commit (several parents) that does not record its merged value
-// (see Patch.mergeParent) and has no hash: written before merge commits
-// recorded their merged value. Which merge its author used cannot be told
-// from the patch (see PatchGraphOptions.unmarkedMerges).
-function isUnmarkedMerge(patch: Patch): boolean {
+// (see Patch.mergeParent) and has no hash, so was written by a version that
+// applied every patch in time order (patchflow 0.8 and earlier; 0.9 was never
+// used in production), or with the value of that same fallback (see
+// Session.commit). Its value is computed the way its author computed the value
+// it is a diff from (see legacyValueOfSet), not with merge3, so a history
+// written before exact merges keeps its values.
+function isLegacyMerge(patch: Patch): boolean {
   return (
     (patch.parents?.length ?? 0) > 1 &&
     patch.mergeParent == null &&
@@ -151,8 +144,6 @@ export class PatchGraph {
   // snapshot never change), and the inconsistencies reported.
   private snapshotOk = new globalThis.Map<string, boolean>();
   private reported = new Set<string>();
-  // See PatchGraphOptions.unmarkedMerges.
-  private unmarkedApplyAll: boolean;
   // Values of legacy replays (see legacyValueOfSet) after a prefix of their
   // time-ordered patches, so a replay that extends an earlier one (e.g. the
   // next merge commit) continues from it.
@@ -163,7 +154,6 @@ export class PatchGraph {
   constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
     this.onInconsistency = opts.onInconsistency;
-    this.unmarkedApplyAll = opts.unmarkedMerges === "apply-all";
     const exactMax = opts.exactCacheMaxEntries ?? DEFAULT_EXACT_CACHE_MAX_ENTRIES;
     const exactMaxSize = opts.exactCacheMaxSize ?? DEFAULT_EXACT_CACHE_MAX_SIZE;
     const exactOpts = { max: exactMax, maxSize: exactMaxSize, sizeCalculation: docSize };
@@ -428,18 +418,12 @@ export class PatchGraph {
     return doc;
   }
 
-  // An unmarked merge commit whose value is computed as patchflow 0.8 did
-  // (see PatchGraphOptions.unmarkedMerges).
-  private isLegacyMerge(patch: Patch): boolean {
-    return this.unmarkedApplyAll && isUnmarkedMerge(patch);
-  }
-
   // The value a patch is a diff from: the merged value of its parents, as
   // its author computed it (see Patch.mergeParent and isLegacyMerge).
   private parentsValue(patch: Patch): Document | undefined {
     const parents = patch.parents ?? [];
     if (parents.length === 0) return this.codec.fromString("");
-    if (this.isLegacyMerge(patch)) return this.legacyValueOfSet(parents);
+    if (isLegacyMerge(patch)) return this.legacyValueOfSet(parents);
     const recorded = mergeParent(patch);
     if (recorded == null) return this.exactValueOfSet(parents);
     const value = this.exactValue(recorded);
@@ -982,7 +966,7 @@ export class PatchGraph {
       if (snapshot === "bad" && patch.patch == null) return undefined;
       // A legacy merge commit's value is computed from its parents' history,
       // not from their exact values (see legacyValueOfSet).
-      if (this.isLegacyMerge(patch)) continue;
+      if (isLegacyMerge(patch)) continue;
       for (const parent of valueParents(patch)) {
         if (!this.patches.has(parent)) return undefined;
         uses.set(parent, (uses.get(parent) ?? 0) + 1);
@@ -998,7 +982,7 @@ export class PatchGraph {
       const patch = this.patches.get(t)!;
       let doc: Document | undefined;
       const useSnapshot = this.snapshotState(patch) === "use";
-      const legacy = !useSnapshot && this.isLegacyMerge(patch);
+      const legacy = !useSnapshot && isLegacyMerge(patch);
       const parents = useSnapshot || legacy ? [] : valueParents(patch);
       if (useSnapshot) {
         doc = this.codec.fromString(patch.snapshot!);

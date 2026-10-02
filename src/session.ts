@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { PatchGraph, type PatchGraphOptions } from "./patch-graph";
+import { PatchGraph } from "./patch-graph";
 import { rebaseDraft } from "./working-copy";
 import { decodePatchId, encodePatchId } from "./patch-id";
 import { makeClientId } from "./client-id";
@@ -35,9 +35,6 @@ export type SessionOptions = {
   fileAdapter?: FileAdapter;
   // Optional presence adapter to publish/receive lightweight presence state.
   presenceAdapter?: PresenceAdapter;
-  // How to read merge commits written before they recorded their merged
-  // value; see PatchGraphOptions.unmarkedMerges.
-  unmarkedMerges?: PatchGraphOptions["unmarkedMerges"];
 };
 
 // Parents considered as the one a merge commit records its merged value from
@@ -113,7 +110,6 @@ export class Session extends EventEmitter {
     this.graph = new PatchGraph({
       codec: this.codec,
       onInconsistency: (inconsistency) => this.emit("inconsistency", inconsistency),
-      unmarkedMerges: opts.unmarkedMerges,
     });
     const factory = opts.clientIdFactory ?? makeClientId;
     this.clientId = opts.clientId ?? factory();
