@@ -60,11 +60,21 @@ export class Session extends EventEmitter {
   private undoPtr = 0;
   private unsubscribe?: () => void;
   private fileUnsubscribe?: () => void;
-  private pendingWrite?: Promise<void>;
+  // Whether flushFileQueue is running. Set and cleared by the flush itself:
+  // it can finish synchronously (when nothing needs writing), and a flag set
+  // by the caller after it returned would then never be cleared.
+  private flushingFile = false;
   private dirtyDoc?: Document;
   private writingDoc?: Document;
   private persistedContent?: string;
   private suppressFileChanges = 0;
+  // While the value is unavailable (see isValueAvailable) nothing is written
+  // to the file, which then holds `heldFileContent` (undefined if unknown).
+  private fileWritesHeld = false;
+  private heldFileContent?: string;
+  private resumingFileSync?: Promise<void>;
+  private resumeRetryTimer?: ReturnType<typeof setTimeout>;
+  private closed = false;
   private hasMoreHistory = false;
   private cursorTtlMs = 60_000;
   private cursorStates: Map<string, CursorSnapshot> = new Map();
@@ -87,7 +97,10 @@ export class Session extends EventEmitter {
     this.docId = opts.docId;
     this.fileAdapter = opts.fileAdapter;
     this.presenceAdapter = opts.presenceAdapter;
-    this.graph = new PatchGraph({ codec: this.codec });
+    this.graph = new PatchGraph({
+      codec: this.codec,
+      onInconsistency: (inconsistency) => this.emit("inconsistency", inconsistency),
+    });
     const factory = opts.clientIdFactory ?? makeClientId;
     this.clientId = opts.clientId ?? factory();
   }
@@ -105,8 +118,18 @@ export class Session extends EventEmitter {
     this.committedDoc = this.graph.value();
     this.doc = this.committedDoc;
     if (this.fileAdapter && this.doc) {
-      // Track current doc string so we can skip redundant writes.
-      this.persistedContent = this.codec.toString(this.doc);
+      if (this.graph.valueUnavailable()) {
+        // The best-effort value is not what the file holds.
+        this.fileWritesHeld = true;
+        try {
+          this.heldFileContent = await this.fileAdapter.read();
+        } catch {
+          this.heldFileContent = undefined;
+        }
+      } else {
+        // Track current doc string so we can skip redundant writes.
+        this.persistedContent = this.codec.toString(this.doc);
+      }
     }
     this.emit("change", this.doc);
     this.unsubscribe = this.patchStore.subscribe((env) => {
@@ -131,6 +154,11 @@ export class Session extends EventEmitter {
 
   // Tear down subscriptions and presence when done.
   close(): void {
+    this.closed = true;
+    if (this.resumeRetryTimer != null) {
+      clearTimeout(this.resumeRetryTimer);
+      this.resumeRetryTimer = undefined;
+    }
     this.unsubscribe?.();
     this.fileUnsubscribe?.();
     this.presenceAdapter?.publish(undefined);
@@ -166,6 +194,37 @@ export class Session extends EventEmitter {
   isCut(time: string): boolean {
     this.ensureInitialized();
     return this.graph.isCut(time);
+  }
+
+  // Whether this client's exact value of a patch matches the hash its author
+  // recorded (see PatchGraph.verifyValue); e.g. check before writing a
+  // snapshot of it.
+  verifyValue(time: string): "ok" | "mismatch" | "unknown" {
+    this.ensureInitialized();
+    return this.graph.verifyValue(time);
+  }
+
+  // False while the document depends on a snapshot that differs from its
+  // patch's value and that patch is not loaded (see
+  // PatchGraph.valueUnavailable): getDocument() is then a best-effort view
+  // without that snapshot, commit() refuses to record anything on top of it,
+  // and needsMoreHistory() is true; loading more history makes it available.
+  isValueAvailable(): boolean {
+    this.ensureInitialized();
+    return !this.graph.valueUnavailable();
+  }
+
+  private assertValueAvailable(): void {
+    if (this.graph.valueUnavailable()) {
+      throw new Error(
+        "patchflow: the document's value is not known (a snapshot differs from its patch's value); load more history before committing",
+      );
+    }
+  }
+
+  // Hash of a value, as stored in Patch.hash.
+  hashOf(doc: Document): string {
+    return this.graph.hashOf(doc);
   }
 
   // Return patch ids (versions) in ascending order.
@@ -275,7 +334,14 @@ export class Session extends EventEmitter {
     if (!this.committedDoc) {
       throw new Error("session not initialized");
     }
-    const base = this.workingCopy?.base ?? this.committedDoc;
+    this.assertValueAvailable();
+    const parents = this.graph.getValueHeads();
+    // With exact values, make the patch against the exact value of its
+    // parents, which is what every client applies it to; then the history
+    // records exactly nextDoc. (The committed document can differ from it,
+    // e.g. after undo, which hides patches that are still parents.)
+    const parentsValue = this.graph.exactValueOf(parents);
+    const base = parentsValue ?? this.workingCopy?.base ?? this.committedDoc;
     const patch = this.codec.makePatch(base, nextDoc);
     const timeMs = this.nextTimeMs();
     const time = encodePatchId(timeMs, this.clientId);
@@ -284,12 +350,13 @@ export class Session extends EventEmitter {
       time,
       wall: this.clock(),
       patch,
-      parents: this.graph.getValueHeads(),
+      parents,
       userId: this.userId,
       version: nextVersion,
       file: opts.file,
       source: opts.source,
       meta: opts.meta,
+      hash: parentsValue == null ? undefined : this.graph.hashOf(nextDoc),
     };
     this.graph.add([envelope]);
     this.maxVersion = Math.max(this.maxVersion, nextVersion);
@@ -458,8 +525,68 @@ export class Session extends EventEmitter {
 
     // If a file adapter is present, keep it in sync
     if (this.fileAdapter && this.doc) {
+      if (this.graph.valueUnavailable()) {
+        // Never persist a best-effort value: the file keeps what it has.
+        if (!this.fileWritesHeld) {
+          this.fileWritesHeld = true;
+          this.heldFileContent = this.persistedContent;
+        }
+        return;
+      }
+      if (this.fileWritesHeld) {
+        this.resumingFileSync ??= this.resumeFileSync().finally(() => {
+          this.resumingFileSync = undefined;
+        });
+        return;
+      }
       this.queueFileWriteDoc(liveDoc);
     }
+  }
+
+  // The value became available again: the file still holds what it held
+  // when writes were held, unless someone edited it meanwhile. Such an edit
+  // is ingested like any external edit; otherwise the value is written.
+  private async resumeFileSync(): Promise<void> {
+    let text: string | undefined;
+    try {
+      text = await this.fileAdapter!.read();
+    } catch {
+      text = undefined;
+    }
+    if (!this.fileWritesHeld || this.graph.valueUnavailable()) return;
+    if (text === undefined) {
+      // Without knowing what the file holds now, writing could destroy an
+      // edit made meanwhile: keep holding and try again.
+      this.scheduleResumeRetry();
+      return;
+    }
+    this.fileWritesHeld = false;
+    const held = this.heldFileContent;
+    this.heldFileContent = undefined;
+    this.persistedContent = text;
+    // If the file changed while held, or what it held is unknown (its first
+    // read failed), its content may be an external edit: ingest it, which
+    // keeps both versions in the history, rather than overwrite it.
+    if ((held === undefined || text !== held) && this.doc) {
+      const fileDoc = this.codec.fromString(text);
+      if (!this.doc.isEqual(fileDoc)) {
+        await this.applyExternalDoc(fileDoc);
+        return;
+      }
+    }
+    if (this.doc) this.queueFileWriteDoc(this.doc);
+  }
+
+  private scheduleResumeRetry(): void {
+    if (this.resumeRetryTimer != null) return;
+    this.resumeRetryTimer = setTimeout(() => {
+      this.resumeRetryTimer = undefined;
+      if (!this.fileWritesHeld || this.closed) return;
+      this.resumingFileSync ??= this.resumeFileSync().finally(() => {
+        this.resumingFileSync = undefined;
+      });
+    }, 1000);
+    this.resumeRetryTimer.unref?.();
   }
 
   // List local patch times that should be excluded (undo region).
@@ -547,6 +674,8 @@ export class Session extends EventEmitter {
   // React to filesystem changes by ingesting external content.
   private async handleFileChange(): Promise<void> {
     if (!this.doc || !this.fileAdapter) return;
+    // Compared with the held content when writes resume.
+    if (this.fileWritesHeld) return;
     if (this.suppressFileChanges > 0) {
       this.suppressFileChanges -= 1;
       return;
@@ -565,7 +694,12 @@ export class Session extends EventEmitter {
   // Convert external doc changes into a patch and append it.
   private async applyExternalDoc(newDoc: Document): Promise<void> {
     if (!this.doc) return;
-    const patch = this.doc.makePatch(newDoc);
+    // Not on top of a value that is known to be wrong (see isValueAvailable).
+    if (!this.isValueAvailable()) return;
+    const parents = this.graph.getValueHeads();
+    // Against the exact value of the parents, as in commit().
+    const parentsValue = this.graph.exactValueOf(parents);
+    const patch = (parentsValue ?? this.doc).makePatch(newDoc);
     const timeMs = this.nextTimeMs();
     const time = encodePatchId(timeMs, this.clientId);
     const nextVersion = Math.max(this.maxVersion + 1, this.graph.versions().length + 1);
@@ -573,10 +707,11 @@ export class Session extends EventEmitter {
       time,
       wall: this.clock(),
       patch,
-      parents: this.graph.getValueHeads(),
+      parents,
       userId: this.userId,
       version: nextVersion,
       file: true,
+      hash: parentsValue == null ? undefined : this.graph.hashOf(newDoc),
     };
     this.graph.add([envelope]);
     this.maxVersion = Math.max(this.maxVersion, nextVersion);
@@ -594,12 +729,13 @@ export class Session extends EventEmitter {
     if (this.writingDoc && this.writingDoc.isEqual(doc)) return;
     if (this.dirtyDoc && this.dirtyDoc.isEqual(doc)) return;
     this.dirtyDoc = doc;
-    if (this.pendingWrite) return;
-    this.pendingWrite = this.flushFileQueue();
+    if (this.flushingFile) return;
+    void this.flushFileQueue();
   }
 
   // Sequentially write queued content to the file adapter with base hints.
   private async flushFileQueue(): Promise<void> {
+    this.flushingFile = true;
     while (this.dirtyDoc !== undefined) {
       const doc = this.dirtyDoc;
       this.dirtyDoc = undefined;
@@ -624,6 +760,6 @@ export class Session extends EventEmitter {
         this.writingDoc = undefined;
       }
     }
-    this.pendingWrite = undefined;
+    this.flushingFile = false;
   }
 }

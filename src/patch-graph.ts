@@ -1,7 +1,15 @@
 import { List, Map } from "immutable";
 import { LRUCache } from "lru-cache";
 import { comparePatchId, decodePatchId } from "./patch-id";
-import type { DocCodec, Document, MergeStrategy, Patch, PatchGraphValueOptions } from "./types";
+import type {
+  DocCodec,
+  Document,
+  Inconsistency,
+  MergeStrategy,
+  Patch,
+  PatchGraphValueOptions,
+} from "./types";
+import { hashString, sameHashFormat } from "./value-hash";
 
 type PatchMap = Map<string, Patch>;
 
@@ -9,9 +17,8 @@ const DEFAULT_DEDUP_TOLERANCE = 3000;
 const DEFAULT_VALUE_CACHE_MAX_ENTRIES = 100;
 const DEFAULT_VALUE_CACHE_MAX_SIZE = 10_000_000;
 const DEFAULT_EXACT_CACHE_MAX_ENTRIES = 2000;
-// Bound on the total size (doc.size()) of cached exact values, like the value
-// cache: a long history of a large text would otherwise keep thousands of full
-// copies of it.
+// Bound on the total size (see docSize) of cached exact values: a long history
+// of a large text would otherwise keep thousands of full copies of it.
 const DEFAULT_EXACT_CACHE_MAX_SIZE = 10_000_000;
 const RECENT_EXACT_ENTRIES = 8;
 
@@ -22,11 +29,21 @@ export type PatchGraphOptions = {
   valueCacheMaxSize?: number;
   exactCacheMaxEntries?: number;
   exactCacheMaxSize?: number;
+  // Called when an exact value does not match the hash its author recorded
+  // (Patch.hash): this client and the author disagree about the document.
+  // Values computed by the apply-all fallback are approximations and are not
+  // checked.
+  onInconsistency?: (inconsistency: Inconsistency) => void;
 };
 
+// Size of a cached exact value: characters of a text, records of a database
+// document. Not doc.size(), which estimates a database document's JSONL text:
+// cached versions of one share their unchanged records, so that would count
+// each about a thousand times over and leave room for only a few dozen
+// values, fewer than merging a wide concurrent history needs.
 function docSize(value: { doc: Document }): number {
   const doc = value?.doc as any;
-  const size = doc?.size?.() ?? doc?.count?.();
+  const size = doc?.count?.() ?? doc?.size?.();
   return Number.isFinite(size) && size > 0 ? Math.ceil(size) : 1;
 }
 
@@ -77,13 +94,29 @@ export class PatchGraph {
   private recentExact = new globalThis.Map<string, Document>();
   // Likewise the most recent merged values of patch sets (e.g. concurrent heads).
   private recentMerged = new globalThis.Map<string, Document>();
+  // Values requested during the outermost exact computation (see pinExact).
+  // The size bounded caches can evict a value while a merge of a wide
+  // criss-cross history still needs it; recomputing it there repeats the
+  // whole merge recursion below it, which grows exponentially.
+  private pinnedExact?: globalThis.Map<string, Document>;
+  private pinnedMerged?: globalThis.Map<string, Document>;
   private waitingCache?: Set<string>;
   // Incremented whenever the graph changes in a way that can change values:
   // new patches, or a snapshot record upgraded with its patch (see add).
   private revisionCount = 0;
+  private unavailableCache?: { revision: number; value: boolean };
+  private onInconsistency?: (inconsistency: Inconsistency) => void;
+  // Patches whose value has been checked against their hash: true if it
+  // matched. A value is checked once, the first time it is computed.
+  private hashChecked = new globalThis.Map<string, boolean>();
+  // Snapshots checked against their patch's hash (the text and the hash of a
+  // snapshot never change), and the inconsistencies reported.
+  private snapshotOk = new globalThis.Map<string, boolean>();
+  private reported = new Set<string>();
 
   constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
+    this.onInconsistency = opts.onInconsistency;
     const exactMax = opts.exactCacheMaxEntries ?? DEFAULT_EXACT_CACHE_MAX_ENTRIES;
     const exactMaxSize = opts.exactCacheMaxSize ?? DEFAULT_EXACT_CACHE_MAX_SIZE;
     const exactOpts = { max: exactMax, maxSize: exactMaxSize, sizeCalculation: docSize };
@@ -679,7 +712,132 @@ export class PatchGraph {
     return doc;
   }
 
+  // Hash of a value (see value-hash.ts).
+  hashOf(doc: Document): string {
+    if (this.codec.hash) return this.codec.hash(doc);
+    if (typeof doc.hash === "function") return doc.hash();
+    return hashString(this.codec.toString(doc));
+  }
+
+  // The exact merged value of a set of patches (e.g. the parents of a new
+  // patch), or undefined if it cannot be computed from the loaded history or
+  // the graph does not compute exact values.
+  exactValueOf(times: string[]): Document | undefined {
+    if (this.codec.merge3 == null || this.mergeStrategy === "apply-all") return undefined;
+    if (times.length === 0) return this.codec.fromString("");
+    return this.exactValueOfSet(times);
+  }
+
+  // Whether this client's exact value of a patch matches the hash its author
+  // recorded: "ok", "mismatch" (also reported to onInconsistency), or
+  // "unknown" if the patch has no hash or the exact value cannot be computed.
+  verifyValue(time: string): "ok" | "mismatch" | "unknown" {
+    const patch = this.patches.get(time);
+    if (patch?.hash == null) return "unknown";
+    const doc = this.exactValueOf([time]);
+    if (doc == null) return "unknown";
+    const ok = this.checkHash(patch, doc);
+    return ok == null ? "unknown" : ok ? "ok" : "mismatch";
+  }
+
+  // Compare a computed value with the patch's hash, once per patch; report a
+  // mismatch. Undefined if there is nothing to compare.
+  private checkHash(patch: Patch, doc: Document): boolean | undefined {
+    const expected = patch.hash;
+    if (expected == null) return undefined;
+    const known = this.hashChecked.get(patch.time);
+    if (known != null) return known;
+    const actual = this.hashOf(doc);
+    if (!sameHashFormat(expected, actual)) return undefined;
+    const ok = actual === expected;
+    this.hashChecked.set(patch.time, ok);
+    if (!ok)
+      this.report({ kind: "patch", time: patch.time, expected, actual, userId: patch.userId });
+    return ok;
+  }
+
+  // Whether exact values start from this patch's snapshot text: "use" (a
+  // snapshot whose text matches its patch's hash, or that cannot be checked),
+  // "bad" (it does not match: reported, and values are computed from the patch
+  // itself instead), or "none" (not a snapshot).
+  private snapshotState(patch: Patch): "use" | "bad" | "none" {
+    if (!(patch.isSnapshot && patch.snapshot != null)) return "none";
+    const expected = patch.hash;
+    if (expected == null) return "use";
+    let ok = this.snapshotOk.get(patch.time);
+    if (ok == null) {
+      const actual = this.hashOf(this.codec.fromString(patch.snapshot));
+      if (!sameHashFormat(expected, actual)) return "use";
+      ok = actual === expected;
+      this.snapshotOk.set(patch.time, ok);
+      if (!ok) {
+        // Values computed before (e.g. by the apply-all fallback) may have
+        // started from it.
+        this.valueCache.clear();
+        this.mergeCache.clear();
+        this.report({ kind: "snapshot", time: patch.time, expected, actual, userId: patch.userId });
+      }
+    }
+    return ok ? "use" : "bad";
+  }
+
+  // Whether the value depends on a snapshot that differs from its patch's
+  // value and that patch's exact value cannot be computed yet, because the
+  // patch or one of its ancestors is not loaded: then no trustworthy value is
+  // known (value() is a best-effort view without that snapshot) until more
+  // history is loaded (needsMoreHistory() is true). Session refuses to commit
+  // and to write the value to a file then.
+  valueUnavailable(): boolean {
+    if (this.unavailableCache?.revision === this.revisionCount) {
+      return this.unavailableCache.value;
+    }
+    let value = false;
+    // Patches below a rejected snapshot are needed to compute its value; other
+    // missing patches are merely below the loaded history.
+    const seen = new globalThis.Map<string, boolean>();
+    const rejected: string[] = [];
+    const stack = this.getValueHeads().map((t) => ({ t, needed: false }));
+    while (stack.length > 0 && !value) {
+      const { t, needed } = stack.pop()!;
+      const before = seen.get(t);
+      if (before === true || (before === false && !needed)) continue;
+      seen.set(t, needed);
+      const patch = this.patches.get(t);
+      if (patch == null) {
+        if (needed) value = true;
+        continue;
+      }
+      const state = this.snapshotState(patch);
+      if (state === "use") continue;
+      if (state === "bad" && patch.patch == null) {
+        value = true;
+        continue;
+      }
+      if (state === "bad") rejected.push(t);
+      const below = needed || state === "bad";
+      for (const parent of patch.parents ?? []) stack.push({ t: parent, needed: below });
+    }
+    // Loaded ancestors are not enough: rebuilding a rejected snapshot's value
+    // can also need the common ancestors of its parents (which the walk above
+    // does not follow past valid snapshots). With exact values, require that
+    // each rejected snapshot's value can actually be computed.
+    if (!value && this.codec.merge3 != null) {
+      value = rejected.some((t) => this.exactValue(t) == null);
+    }
+    this.unavailableCache = { revision: this.revisionCount, value };
+    return value;
+  }
+
+  // Report an inconsistency once.
+  private report(inconsistency: Inconsistency): void {
+    const key = `${inconsistency.kind}:${inconsistency.time}:${inconsistency.actual}`;
+    if (this.reported.has(key)) return;
+    this.reported.add(key);
+    this.onInconsistency?.(inconsistency);
+  }
+
   private clearExactCaches(): void {
+    this.hashChecked.clear();
     this.exactCache.clear();
     this.exactMergeCache.clear();
     this.recentExact.clear();
@@ -690,10 +848,36 @@ export class PatchGraph {
   // its parents, or the snapshot text of a snapshot. Returns undefined if a
   // needed patch is missing. Computed iteratively, parents first.
   private exactValue(time: string): Document | undefined {
-    const recent = this.recentExact.get(time);
-    if (recent) return recent;
-    const cached = this.exactCache.get(time);
-    if (cached) return cached.doc;
+    return this.pinExact(() => this.computeExactValue(time));
+  }
+
+  // Run an exact computation, keeping every value it requests from
+  // exactValue and exactValueOfSet until the outermost one returns, so each
+  // is computed at most once per computation whatever the cache limits.
+  // Intermediate values of a single exactValue walk are not pinned: they are
+  // released as the walk proceeds, so a long history is not held at once.
+  private pinExact<T>(f: () => T): T {
+    if (this.pinnedExact != null) return f();
+    this.pinnedExact = new globalThis.Map();
+    this.pinnedMerged = new globalThis.Map();
+    try {
+      return f();
+    } finally {
+      this.pinnedExact = undefined;
+      this.pinnedMerged = undefined;
+    }
+  }
+
+  private computeExactValue(time: string): Document | undefined {
+    // A requested value is checked against its hash even when it was
+    // computed earlier as an intermediate value, which is not checked.
+    const hit =
+      this.pinnedExact?.get(time) ?? this.recentExact.get(time) ?? this.exactCache.get(time)?.doc;
+    if (hit) {
+      const patch = this.patches.get(time);
+      if (patch != null && this.snapshotState(patch) !== "use") this.checkHash(patch, hit);
+      return hit;
+    }
     // Values computed (or found in the cache) during this call. A value is
     // released as soon as the patches that need it have been computed, so a
     // long history does not hold every intermediate value at once; the size
@@ -701,7 +885,10 @@ export class PatchGraph {
     const computed = new globalThis.Map<string, Document>();
     const uses = new globalThis.Map<string, number>([[time, 1]]);
     const get = (t: string) =>
-      computed.get(t) ?? this.recentExact.get(t) ?? this.exactCache.get(t)?.doc;
+      computed.get(t) ??
+      this.pinnedExact?.get(t) ??
+      this.recentExact.get(t) ??
+      this.exactCache.get(t)?.doc;
     const order: string[] = [];
     const visited = new Set<string>();
     const stack: { t: string; expanded: boolean }[] = [{ t: time, expanded: false }];
@@ -713,7 +900,8 @@ export class PatchGraph {
       }
       if (visited.has(t)) continue;
       visited.add(t);
-      const hit = this.recentExact.get(t) ?? this.exactCache.get(t)?.doc;
+      const hit =
+        this.pinnedExact?.get(t) ?? this.recentExact.get(t) ?? this.exactCache.get(t)?.doc;
       if (hit) {
         computed.set(t, hit);
         continue;
@@ -721,7 +909,13 @@ export class PatchGraph {
       const patch = this.patches.get(t);
       if (!patch) return undefined;
       stack.push({ t, expanded: true });
-      if (patch.isSnapshot && patch.snapshot != null) continue;
+      const snapshot = this.snapshotState(patch);
+      if (snapshot === "use") continue;
+      // A snapshot that differs from its patch's value is not used: the value
+      // is computed from the patch itself, which needs its parents; if the
+      // patch is not loaded, the exact value is unknown until more history is
+      // (see needsMoreHistory).
+      if (snapshot === "bad" && patch.patch == null) return undefined;
       for (const parent of patch.parents ?? []) {
         if (!this.patches.has(parent)) return undefined;
         uses.set(parent, (uses.get(parent) ?? 0) + 1);
@@ -736,9 +930,10 @@ export class PatchGraph {
     for (const t of order) {
       const patch = this.patches.get(t)!;
       let doc: Document | undefined;
-      const parents = patch.isSnapshot && patch.snapshot != null ? [] : (patch.parents ?? []);
-      if (patch.isSnapshot && patch.snapshot != null) {
-        doc = this.codec.fromString(patch.snapshot);
+      const useSnapshot = this.snapshotState(patch) === "use";
+      const parents = useSnapshot ? [] : (patch.parents ?? []);
+      if (useSnapshot) {
+        doc = this.codec.fromString(patch.snapshot!);
       } else {
         let base: Document | undefined;
         if (parents.length === 0) {
@@ -753,10 +948,17 @@ export class PatchGraph {
       }
       computed.set(t, doc);
       this.exactCache.set(t, { doc });
+      // Check the requested value. (Intermediate values are checked when they
+      // are requested themselves, e.g. as heads, to keep loading cheap; a
+      // snapshot's text is checked before it is used, see snapshotState.)
+      if (t === time && !useSnapshot) this.checkHash(patch, doc);
       for (const parent of parents) release(parent);
     }
     const doc = get(time);
-    if (doc != null) remember(this.recentExact, time, doc);
+    if (doc != null) {
+      remember(this.recentExact, time, doc);
+      this.pinnedExact?.set(time, doc);
+    }
     return doc;
   }
 
@@ -767,13 +969,28 @@ export class PatchGraph {
     times: string[],
     get: (t: string) => Document | undefined = () => undefined,
   ): Document | undefined {
+    return this.pinExact(() => this.computeExactValueOfSet(times, get));
+  }
+
+  private computeExactValueOfSet(
+    times: string[],
+    get: (t: string) => Document | undefined,
+  ): Document | undefined {
     const sorted = this.sortHeads(Array.from(new Set(times)));
     if (sorted.length === 1) return get(sorted[0]) ?? this.exactValue(sorted[0]);
     const key = sorted.join(",");
+    const pinned = this.pinnedMerged?.get(key);
+    if (pinned) return pinned;
     const recent = this.recentMerged.get(key);
-    if (recent) return recent;
+    if (recent) {
+      this.pinnedMerged?.set(key, recent);
+      return recent;
+    }
     const cached = this.exactMergeCache.get(key);
-    if (cached) return cached.doc;
+    if (cached) {
+      this.pinnedMerged?.set(key, cached.doc);
+      return cached.doc;
+    }
     const merge3 = this.codec.merge3!;
     let acc = get(sorted[0]) ?? this.exactValue(sorted[0]);
     if (acc == null) return undefined;
@@ -788,6 +1005,7 @@ export class PatchGraph {
     }
     this.exactMergeCache.set(key, { doc: acc });
     remember(this.recentMerged, key, acc);
+    this.pinnedMerged?.set(key, acc);
     return acc;
   }
 
@@ -952,7 +1170,8 @@ export class PatchGraph {
     let best: Patch | undefined;
     for (const t of times) {
       const p = this.patches.get(t);
-      if (p?.isSnapshot && p.snapshot != null) {
+      // Never start from a snapshot that differs from its patch's value.
+      if (p != null && this.snapshotState(p) === "use") {
         if (!best || comparePatchId(p.time, best.time) > 0) {
           best = p;
         }
