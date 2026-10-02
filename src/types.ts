@@ -42,6 +42,18 @@ export interface Patch {
   // (see PatchGraphOptions.onInconsistency). A snapshot record carries the
   // hash of the patch it is a snapshot of.
   hash?: string;
+  // A patch with several parents (a merge commit) is, like any patch, a diff
+  // from the merged value of its parents. From this version on it also
+  // records that merged value, as its author computed it: mergePatch applied
+  // to the exact value of mergeParent, one of the parents. Computing the
+  // value of the patch then needs no merge, so changing the merge algorithm
+  // (DocCodec.merge3) later never changes the values of patches already in a
+  // history, like a git merge commit, which records its merged tree. Clients
+  // that do not know these fields still read `patch` as before. A merge
+  // commit without them, written by an earlier version, see isLegacyMerge in
+  // patch-graph.ts.
+  mergeParent?: PatchId;
+  mergePatch?: unknown;
 }
 
 // A value that does not match the hash its author recorded (Patch.hash).

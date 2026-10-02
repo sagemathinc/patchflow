@@ -37,6 +37,16 @@ export type SessionOptions = {
   presenceAdapter?: PresenceAdapter;
 };
 
+// Parents considered as the one a merge commit records its merged value from
+// (see Session.recordMerge): each costs a diff.
+const MAX_MERGE_PARENT_CANDIDATES = 8;
+
+// Rough size of a patch, to compare patches of the same codec.
+function patchSize(patch: unknown): number {
+  if (patch instanceof Uint8Array) return patch.byteLength;
+  return JSON.stringify(patch)?.length ?? 0;
+}
+
 /**
  * Session orchestrates a local Document against a PatchGraph and a PatchStore.
  * It handles local commits, remote patches, and basic undo/redo of local changes.
@@ -357,6 +367,7 @@ export class Session extends EventEmitter {
       source: opts.source,
       meta: opts.meta,
       hash: parentsValue == null ? undefined : this.graph.hashOf(nextDoc),
+      ...this.recordMerge(parents, parentsValue),
     };
     this.graph.add([envelope]);
     this.maxVersion = Math.max(this.maxVersion, nextVersion);
@@ -372,6 +383,26 @@ export class Session extends EventEmitter {
     // Optionally publish presence after commit
     this.presenceAdapter?.publish({ userId: this.userId, time });
     return envelope;
+  }
+
+  // For a patch with several parents, the merged value of its parents as a
+  // diff from one of them (see Patch.mergeParent), so its value never depends
+  // on how a later version merges. From the parent with the smallest diff,
+  // usually the one with the most of the merged changes.
+  private recordMerge(
+    parents: string[],
+    merged: Document | undefined,
+  ): Pick<PatchEnvelope, "mergeParent" | "mergePatch"> {
+    if (parents.length < 2 || merged == null) return {};
+    let best: { parent: string; patch: unknown; size: number } | undefined;
+    for (const parent of parents.slice(0, MAX_MERGE_PARENT_CANDIDATES)) {
+      const value = this.graph.exactValueOf([parent]);
+      if (value == null) return {};
+      const patch = this.codec.makePatch(value, merged);
+      const size = patchSize(patch);
+      if (best == null || size < best.size) best = { parent, patch, size };
+    }
+    return best == null ? {} : { mergeParent: best.parent, mergePatch: best.patch };
   }
 
   // Merge a remote patch and refresh the current document.
@@ -712,6 +743,7 @@ export class Session extends EventEmitter {
       version: nextVersion,
       file: true,
       hash: parentsValue == null ? undefined : this.graph.hashOf(newDoc),
+      ...this.recordMerge(parents, parentsValue),
     };
     this.graph.add([envelope]);
     this.maxVersion = Math.max(this.maxVersion, nextVersion);

@@ -535,7 +535,7 @@ describe("PatchGraph exact values (codec with merge3)", () => {
           next = lines.join("\n") + "\n";
         }
         const t = legacyPatchId(time++);
-        g.add([patch(t, parents, base, next)]);
+        g.add([commit(g, t, parents, base, next)]);
         seen[c] = [t];
         // Sometimes a client catches up with everything.
         if (rng() < 0.3) seen[Math.floor(rng() * 3)] = g.getHeads();
@@ -581,6 +581,14 @@ describe("PatchGraph exact values (codec with merge3)", () => {
     }
   });
 });
+
+// A patch as Session commits it: a merge commit records its merged value (see
+// Patch.mergeParent).
+function commit(g: PatchGraph, time: string, parents: string[], from: string, to: string): Patch {
+  const p = patch(time, parents, from, to);
+  if (parents.length < 2) return p;
+  return { ...p, mergeParent: parents[0], mergePatch: g.version(parents[0]).makePatch(doc(from)) };
+}
 
 function parentsValue(g: PatchGraph, parents: string[]): string {
   // The value a client committing on top of `parents` started from.
