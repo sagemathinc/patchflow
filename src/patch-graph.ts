@@ -89,6 +89,10 @@ function valueParents(patch: Patch): string[] {
   return parent != null ? [parent] : (patch.parents ?? []);
 }
 
+// The value after replaying a prefix of a legacy merge's patches, and the
+// last patch kept (see legacyValueOfSet).
+type LegacyCheckpoint = { doc: Document; last?: Patch };
+
 function patchCmp(a: Patch, b: Patch): number {
   return comparePatchId(a.time, b.time);
 }
@@ -147,9 +151,11 @@ export class PatchGraph {
   // Values of legacy replays (see legacyValueOfSet) after a prefix of their
   // time-ordered patches, so a replay that extends an earlier one (e.g. the
   // next merge commit) continues from it.
-  private legacyCheckpoints = new LRUCache<string, { doc: Document; last?: Patch }>({
-    max: LEGACY_CHECKPOINTS,
-  });
+  // Bounded by size like the exact caches; the newest is also kept apart
+  // (like recentExact), so a document too large for the cache still continues
+  // from the previous replay.
+  private legacyCheckpoints: LRUCache<string, LegacyCheckpoint>;
+  private recentCheckpoint?: { key: string } & LegacyCheckpoint;
 
   constructor(opts: PatchGraphOptions) {
     this.codec = opts.codec;
@@ -159,6 +165,10 @@ export class PatchGraph {
     const exactOpts = { max: exactMax, maxSize: exactMaxSize, sizeCalculation: docSize };
     this.exactCache = new LRUCache<string, { doc: Document }>(exactOpts);
     this.exactMergeCache = new LRUCache<string, { doc: Document }>(exactOpts);
+    this.legacyCheckpoints = new LRUCache<string, LegacyCheckpoint>({
+      ...exactOpts,
+      max: LEGACY_CHECKPOINTS,
+    });
     this.mergeStrategy = opts.mergeStrategy ?? "three-way";
     const maxSize = opts.valueCacheMaxSize ?? DEFAULT_VALUE_CACHE_MAX_SIZE;
     const maxEntries = opts.valueCacheMaxEntries ?? DEFAULT_VALUE_CACHE_MAX_ENTRIES;
@@ -886,6 +896,7 @@ export class PatchGraph {
   private clearExactCaches(): void {
     this.hashChecked.clear();
     this.legacyCheckpoints.clear();
+    this.recentCheckpoint = undefined;
     this.exactCache.clear();
     this.exactMergeCache.clear();
     this.recentExact.clear();
@@ -1087,7 +1098,11 @@ export class PatchGraph {
     let doc: Document | undefined;
     let last: Patch | undefined;
     for (let i = ordered.length; i > 0; i--) {
-      const checkpoint = this.legacyCheckpoints.get(keys[i - 1]);
+      const key = keys[i - 1];
+      const checkpoint =
+        this.recentCheckpoint?.key === key
+          ? this.recentCheckpoint
+          : this.legacyCheckpoints.get(key);
       if (checkpoint != null) {
         ({ doc, last } = checkpoint);
         start = i;
@@ -1103,7 +1118,11 @@ export class PatchGraph {
       if (patch.patch != null) patches.push(patch.patch);
     }
     if (patches.length > 0) doc = this.codec.applyPatchBatch(doc, patches);
-    if (ordered.length > 0) this.legacyCheckpoints.set(keys[ordered.length - 1], { doc, last });
+    if (ordered.length > 0) {
+      const key = keys[ordered.length - 1];
+      this.legacyCheckpoints.set(key, { doc, last });
+      this.recentCheckpoint = { key, doc, last };
+    }
     this.exactMergeCache.set(key, { doc });
     remember(this.recentMerged, key, doc);
     this.pinnedMerged?.set(key, doc);

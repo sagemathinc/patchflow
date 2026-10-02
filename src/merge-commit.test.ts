@@ -321,3 +321,62 @@ describe("a merge commit with a parent not yet received", () => {
     expect(g.value().toString()).toBe(`${a.getDocument()}`);
   });
 });
+
+describe("replay checkpoints of a large document", () => {
+  it("are bounded by size, and reading merge by merge still continues from the last", async () => {
+    let now = 1000;
+    const clock = () => now++;
+    const make = async (id: string) => {
+      const s = new Session({
+        codec: applyAllCodec,
+        patchStore: new MemoryPatchStore(),
+        clock,
+        clientId: id,
+      });
+      await s.init();
+      return s;
+    };
+    const a = await make("a");
+    const b = await make("b");
+    const big = "x".repeat(99) + "\n";
+    const all: PatchEnvelope[] = [a.commit(doc(big.repeat(2000)))]; // 200,000 characters
+    b.applyRemote(all[0]);
+    const values = new Map<string, string>();
+    const rounds = 30;
+    for (let i = 0; i < rounds; i++) {
+      const l = a.commit(doc(`${a.getDocument()}L${i}\n`));
+      const r = b.commit(doc(`R${i}\n${b.getDocument()}`));
+      a.applyRemote(r);
+      const m = a.commit(doc(`${a.getDocument()}M${i}\n`));
+      b.applyRemoteBatch([l, m]);
+      all.push(l, r, m);
+      values.set(m.time, `${a.getDocument()}`);
+    }
+    let applied = 0;
+    const counting: DocCodec = {
+      ...codec,
+      applyPatch: (d, p) => {
+        applied++;
+        return d.applyPatch(p);
+      },
+      applyPatchBatch: (d, ps) => {
+        applied += ps.length;
+        return d.applyPatchBatch(ps);
+      },
+    };
+    // Less room than one version of the document: only the newest checkpoint,
+    // kept apart, lets the next merge continue.
+    const maxSize = 150_000;
+    const g = new PatchGraph({ codec: counting, exactCacheMaxSize: maxSize });
+    g.add([all[0]]);
+    for (let i = 1; i < all.length; i += 3) {
+      const round = all.slice(i, i + 3);
+      g.add(round);
+      expect(g.value().toString()).toBe(values.get(round[2].time));
+      let kept = 0;
+      for (const { doc } of (g as any).legacyCheckpoints.values()) kept += doc.toString().length;
+      expect(kept).toBeLessThanOrEqual(maxSize);
+    }
+    expect(applied).toBeLessThan(4 * all.length);
+  });
+});
