@@ -78,6 +78,31 @@ describe("mergeStrings3", () => {
     expect(both("abcdef ghi\n", "abXcdef ghi\n", "abcde ghi\n")).toBe("abXcde ghi\n");
   });
 
+  it("applies both sides' whitespace changes symmetrically", () => {
+    // Review of #14: one of two space insertions was dropped, depending on order.
+    expect(both("abcdefgh", "abc defgh", "abcdef gh")).toBe("abc def gh");
+    expect(both("base0123456789", "base0 123456789", "base0123 456789")).toBe("base0 123 456789");
+  });
+
+  it("never combines halves of two different characters outside the BMP", () => {
+    // Review of #14: U+10800 and U+10401 merged into U+10801.
+    const cp = (c: number) => String.fromCodePoint(c);
+    const line = (c: number) => `prefix ${cp(c)} suffix`;
+    const merged = both(line(0x10400), line(0x10800), line(0x10401));
+    expect(merged).toContain(cp(0x10800));
+    expect(merged).toContain(cp(0x10401));
+    expect(merged).not.toContain(cp(0x10801));
+  });
+
+  it("aligns many long lines both sides appended to in bounded time", () => {
+    // Review of #14: comparing line contents for every pair took seconds.
+    const lines = (suffix: string) =>
+      Array.from({ length: 160 }, (_, i) => "a".repeat(12_000) + i + suffix).join("\n") + "\n";
+    const start = performance.now();
+    merge(lines(""), lines("X"), lines("Y"));
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
   it("still keeps both versions when both sides replaced the same characters", () => {
     expect(both("a cat b\n", "a dog b\n", "a cow b\n")).toBe("a cow dog b\n");
     expect(both("The Color of Pomegranates\n", "", "The Colour of Pomegranates\n")).toBe(

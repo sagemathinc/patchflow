@@ -465,9 +465,10 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
   // edits of one line the closest wins; the same line outweighs any edit.
   const weight = (x: number, y: number): number => {
     if (inserted[x] === deleted[y]) return 2 + del[y].total;
-    const kept = Math.max(editScore(del[y], ins[x]), charEditScore(deleted[y], inserted[x]));
+    const kept = editScore(del[y], ins[x]) || charEditScore(deleted[y], inserted[x], budget);
     return kept > 0 ? 1 + kept : 0;
   };
+  const budget = { left: MAX_CHAR_ALIGN_WORK };
   const w: number[][] = [];
   for (let x = 0; x < n; x++) {
     w.push([]);
@@ -570,6 +571,7 @@ function alignLinesGreedy(inserted: string[], deleted: string[]): [number, numbe
   const pairs: [number, number][] = [];
   const del: (WordProfile | undefined)[] = [];
   const profile = (k: number) => (del[k] ??= wordProfile(deleted[k]));
+  const budget = { left: MAX_CHAR_ALIGN_WORK };
   let y = 0;
   for (let x = 0; x < inserted.length && y < deleted.length; x++) {
     const end = Math.min(deleted.length, y + ALIGN_LOOKAHEAD);
@@ -578,7 +580,7 @@ function alignLinesGreedy(inserted: string[], deleted: string[]): [number, numbe
       if (
         inserted[x] === deleted[k] ||
         editScore(profile(k), ins) > 0 ||
-        charEditScore(deleted[k], inserted[x]) > 0
+        charEditScore(deleted[k], inserted[x], budget) > 0
       ) {
         pairs.push([x, k]);
         y = k + 1;
@@ -604,9 +606,14 @@ function editScore(base: WordProfile, text: WordProfile): number {
 // its base. Short lines are left to editScore: there a line containing
 // another ("t11" and "t1") is as likely a different line.
 const MIN_TYPED_LINE = 6;
-function charEditScore(base: string, text: string): number {
+// Characters charEditScore may compare in one alignment, so its cost stays
+// bounded (deterministically) however many long lines are aligned.
+const MAX_CHAR_ALIGN_WORK = 1_000_000;
+function charEditScore(base: string, text: string, budget: { left: number }): number {
   const n = base.length;
   if (base.trim().length < MIN_TYPED_LINE || text.length <= n) return 0;
+  if (budget.left < n) return 0;
+  budget.left -= n;
   let prefix = 0;
   while (prefix < n && base[prefix] === text[prefix]) prefix++;
   let suffix = 0;
@@ -767,6 +774,26 @@ function charEdits(base: string, text: string): Edit[] {
   return edits;
 }
 
+const isHighSurrogate = (c: number) => c >= 0xd800 && c <= 0xdbff;
+const isLowSurrogate = (c: number) => c >= 0xdc00 && c <= 0xdfff;
+
+// Whether an edit splits a character outside the BMP (a surrogate pair):
+// its boundaries fall between the two halves, or its inserted text starts or
+// ends with half a pair. Merging such edits could combine one user's high
+// half with the other's low half, a character neither typed.
+function splitsSurrogate(base: string, e: Edit): boolean {
+  const inside = (i: number) =>
+    i > 0 &&
+    i < base.length &&
+    isLowSurrogate(base.charCodeAt(i)) &&
+    isHighSurrogate(base.charCodeAt(i - 1));
+  if (inside(e.from) || inside(e.to)) return true;
+  const n = e.insert.length;
+  return (
+    n > 0 && (isLowSurrogate(e.insert.charCodeAt(0)) || isHighSurrogate(e.insert.charCodeAt(n - 1)))
+  );
+}
+
 // Both sides typed into the same word or line, for example two people
 // adding characters at the end of one word: if their character edits do not
 // overlap, apply both. (Keeping both versions would repeat the whole word or
@@ -780,7 +807,9 @@ function disjointCharEdits(chunk: Chunk): string | undefined {
     return undefined;
   }
   const merged = charEdits(base, chunk.a);
-  for (const e of charEdits(base, chunk.b)) {
+  const bEdits = charEdits(base, chunk.b);
+  if ([...merged, ...bEdits].some((e) => splitsSurrogate(base, e))) return undefined;
+  for (const e of bEdits) {
     const same = (x: Edit) => x.from === e.from && x.to === e.to && x.insert === e.insert;
     if (merged.some(same)) continue;
     const at = isInsertion(e) ? merged.findIndex((x) => isInsertion(x) && x.from === e.from) : -1;
@@ -868,8 +897,15 @@ function resolveTrivial(chunk: Chunk): string | undefined {
   if (chunk.base === "") {
     return chunk.a <= chunk.b ? joinAdded(chunk.a, chunk.b, " ") : joinAdded(chunk.b, chunk.a, " ");
   }
-  if (sameIgnoringWhitespace(chunk.base, chunk.a)) return chunk.b;
-  if (sameIgnoringWhitespace(chunk.base, chunk.b)) return chunk.a;
+  const aSpace = sameIgnoringWhitespace(chunk.base, chunk.a);
+  const bSpace = sameIgnoringWhitespace(chunk.base, chunk.b);
+  // Both sides changed only whitespace: apply both if they do not overlap,
+  // otherwise pick one by content, so the merge is symmetric.
+  if (aSpace && bSpace) {
+    return disjointCharEdits(chunk) ?? (chunk.a <= chunk.b ? chunk.a : chunk.b);
+  }
+  if (aSpace) return chunk.b;
+  if (bSpace) return chunk.a;
   return preferEdit(chunk);
 }
 
