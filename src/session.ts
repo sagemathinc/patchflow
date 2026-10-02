@@ -367,6 +367,7 @@ export class Session extends EventEmitter {
       source: opts.source,
       meta: opts.meta,
       hash: parentsValue == null ? undefined : this.graph.hashOf(nextDoc),
+      ...(parentsValue == null ? { inexact: true } : {}),
       ...this.recordMerge(parents, parentsValue),
     };
     this.graph.add([envelope]);
@@ -743,6 +744,7 @@ export class Session extends EventEmitter {
       version: nextVersion,
       file: true,
       hash: parentsValue == null ? undefined : this.graph.hashOf(newDoc),
+      ...(parentsValue == null ? { inexact: true } : {}),
       ...this.recordMerge(parents, parentsValue),
     };
     this.graph.add([envelope]);

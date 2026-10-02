@@ -4,6 +4,7 @@ import { MemoryPatchStore } from "./adapters/memory-patch-store";
 import { mergeStrings3 } from "./merge3";
 import { StringCodec, StringDocument } from "./string-document";
 import { legacyPatchId } from "./patch-id";
+import { hashString } from "./value-hash";
 import type { DocCodec, Inconsistency, Patch, PatchEnvelope } from "./types";
 
 const doc = (s: string) => new StringDocument(s);
@@ -64,6 +65,9 @@ async function writers(c: DocCodec, n: number) {
 }
 
 const strip = ({ mergeParent: _p, mergePatch: _m, ...rest }: PatchEnvelope): Patch => rest;
+
+// A patch as patchflow 0.8 wrote it: no inexact marker.
+const as08 = ({ inexact: _inexact, ...rest }: PatchEnvelope): PatchEnvelope => rest;
 
 describe("merge commits record their merged value", () => {
   async function history() {
@@ -179,7 +183,7 @@ describe("a history written before merge commits recorded their merged value", (
       // Concurrent edits of the same words, which merge differently.
       const k = Math.floor(rng() * words.length);
       words[k] = `${words[k]}${step}`;
-      all.push(s.commit(doc(words.join(" "))));
+      all.push(as08(s.commit(doc(words.join(" ")))));
     }
     return all;
   }
@@ -268,7 +272,7 @@ describe("merge commits written before hashes", () => {
       a.applyRemote(r);
       const m = a.commit(doc(`${a.getDocument()}M${i}\n`));
       b.applyRemoteBatch([l, m]);
-      all.push(l, r, m);
+      all.push(...[l, r, m].map(as08));
       values.set(m.time, `${a.getDocument()}`);
     }
     expect(all.filter((p) => (p.parents?.length ?? 0) > 1 && p.hash == null)).toHaveLength(rounds);
@@ -349,7 +353,7 @@ describe("replay checkpoints of a large document", () => {
       a.applyRemote(r);
       const m = a.commit(doc(`${a.getDocument()}M${i}\n`));
       b.applyRemoteBatch([l, m]);
-      all.push(l, r, m);
+      all.push(...[l, r, m].map(as08));
       values.set(m.time, `${a.getDocument()}`);
     }
     let applied = 0;
@@ -378,5 +382,53 @@ describe("replay checkpoints of a large document", () => {
       expect(kept).toBeLessThanOrEqual(maxSize);
     }
     expect(applied).toBeLessThan(4 * all.length);
+  });
+});
+
+describe("a merge commit made without the exact value of its parents", () => {
+  const id = legacyPatchId;
+  const patch = (t: number, parents: number[], from: string, to: string): Patch => ({
+    time: id(t),
+    parents: parents.map(id),
+    patch: doc(from).makePatch(doc(to)),
+    hash: hashString(to),
+  });
+  // 2 deletes a line that 3 edits concurrently; 4 merges them (the edit
+  // wins) and is snapshotted; 5 edits a line that 6 deletes concurrently.
+  const ps = [
+    patch(1, [], "", "a\nb\nc\n"),
+    patch(2, [1], "a\nb\nc\n", "a\nc\n"),
+    patch(3, [1], "a\nb\nc\n", "a\nB\nc\n"),
+    patch(4, [2, 3], "a\nB\nc\n", "a\nB\nc\nd\n"),
+    patch(5, [4], "a\nB\nc\nd\n", "a\nB\nC!\nd\n"),
+    patch(6, [3], "a\nB\nc\n", "a\nB\n"),
+  ];
+  const snapshot: Patch = { ...ps[3], isSnapshot: true, snapshot: "a\nB\nc\nd\n" };
+
+  it("is marked inexact, and read with merge3", async () => {
+    // A client with the snapshot, 5 and 6, but not 3 (below the snapshot):
+    // it cannot compute the exact merge of 5 and 6.
+    const s = new Session({
+      codec,
+      patchStore: new MemoryPatchStore([snapshot, ps[4], ps[5]]),
+      clientId: "late",
+    });
+    await s.init();
+    expect(s.getHeads()).toEqual([id(5), id(6)].sort());
+    const merge = s.commit(doc(`${s.getDocument()}g\n`));
+    s.close();
+    expect(merge.parents).toHaveLength(2);
+    expect(merge.hash).toBeUndefined();
+    expect(merge.mergeParent).toBeUndefined();
+    expect(merge.inexact).toBe(true);
+    // Read with merge3, like any merge commit of this version, not by
+    // replaying the history in time order (which depends on the history a
+    // client has loaded, and here differs).
+    const full = graph(codec, [...ps, snapshot, merge]);
+    const value = full.version(merge.time).toString();
+    const merged = full.exactValueOf(merge.parents!)!;
+    expect(value).toBe(codec.applyPatch(merged, merge.patch).toString());
+    const legacy = graph(codec, [...ps, snapshot, { ...merge, inexact: undefined }]);
+    expect(legacy.version(merge.time).toString()).not.toBe(value);
   });
 });

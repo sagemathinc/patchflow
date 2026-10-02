@@ -54,6 +54,12 @@ export interface Patch {
   // patch-graph.ts.
   mergeParent?: PatchId;
   mergePatch?: unknown;
+  // Set by this version on a patch committed without the exact value of its
+  // parents (e.g. before the history needed for it was loaded): `patch` is a
+  // diff from an approximation of that value, and the patch has no hash. It
+  // tells such a patch apart from one written by a version before exact
+  // merges (see isLegacyMerge in patch-graph.ts).
+  inexact?: boolean;
 }
 
 // A value that does not match the hash its author recorded (Patch.hash).
