@@ -60,17 +60,21 @@ function isRoot(patch: Patch): boolean {
 }
 
 // A merge commit (several parents) that does not record its merged value
-// (see Patch.mergeParent) and has no hash, so was written by a version that
-// applied every patch in time order (patchflow 0.8 and earlier; 0.9 was never
-// used in production), or with the value of that same fallback (see
-// Session.commit). Its value is computed the way its author computed the value
-// it is a diff from (see legacyValueOfSet), not with merge3, so a history
-// written before exact merges keeps its values.
+// (see Patch.mergeParent), has no hash and is not marked inexact, so was
+// written by a version that applied every patch in time order (patchflow 0.8
+// and earlier; 0.9 was never used in production). Its value is computed the
+// way its author computed the value it is a diff from (see legacyValueOfSet),
+// not with merge3, so a history written before exact merges keeps its values.
+// A merge commit written by this version without the exact value of its
+// parents is marked inexact (Patch.inexact) and read with merge3, which, unlike
+// replaying the history in time order, does not depend on how much of the
+// history a client has loaded.
 function isLegacyMerge(patch: Patch): boolean {
   return (
     (patch.parents?.length ?? 0) > 1 &&
     patch.mergeParent == null &&
     patch.hash == null &&
+    !patch.inexact &&
     patch.patch != null
   );
 }
@@ -774,6 +778,13 @@ export class PatchGraph {
     if (this.codec.hash) return this.codec.hash(doc);
     if (typeof doc.hash === "function") return doc.hash();
     return hashString(this.codec.toString(doc));
+  }
+
+  // Whether this graph computes exact values (the codec provides merge3 and
+  // the strategy is not apply-all). Otherwise every value applies all patches
+  // in time order, as patchflow 0.8 did.
+  computesExactValues(): boolean {
+    return this.codec.merge3 != null && this.mergeStrategy !== "apply-all";
   }
 
   // The exact merged value of a set of patches (e.g. the parents of a new
