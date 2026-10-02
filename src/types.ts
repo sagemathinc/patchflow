@@ -50,8 +50,8 @@ export interface Patch {
   // (DocCodec.merge3) later never changes the values of patches already in a
   // history, like a git merge commit, which records its merged tree. Clients
   // that do not know these fields still read `patch` as before. A merge
-  // commit without them, written by an earlier version, see isLegacyMerge in
-  // patch-graph.ts.
+  // commit without them, written by an earlier version: see
+  // PatchGraphOptions.unmarkedMerges.
   mergeParent?: PatchId;
   mergePatch?: unknown;
 }

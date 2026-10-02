@@ -1,4 +1,4 @@
-import { PatchGraph } from "./patch-graph";
+import { PatchGraph, type PatchGraphOptions } from "./patch-graph";
 import { Session } from "./session";
 import { MemoryPatchStore } from "./adapters/memory-patch-store";
 import { mergeStrings3 } from "./merge3";
@@ -29,8 +29,17 @@ const otherCodec: DocCodec = {
 // patch in time order.
 const applyAllCodec = StringCodec as unknown as DocCodec;
 
-function graph(c: DocCodec, patches: Patch[], inconsistencies: Inconsistency[] = []) {
-  const g = new PatchGraph({ codec: c, onInconsistency: (x) => inconsistencies.push(x) });
+function graph(
+  c: DocCodec,
+  patches: Patch[],
+  inconsistencies: Inconsistency[] = [],
+  opts: Partial<PatchGraphOptions> = {},
+) {
+  const g = new PatchGraph({
+    codec: c,
+    onInconsistency: (x) => inconsistencies.push(x),
+    ...opts,
+  });
   g.add(patches);
   return g;
 }
@@ -150,6 +159,8 @@ describe("merge commits record their merged value", () => {
   });
 });
 
+const applyAll = { unmarkedMerges: "apply-all" } as const;
+
 describe("a history written before merge commits recorded their merged value", () => {
   // Written by versions that applied every patch in time order: no hashes,
   // merge commits are diffs from that value of their parents.
@@ -183,7 +194,7 @@ describe("a history written before merge commits recorded their merged value", (
       merges += all.filter((p) => (p.parents?.length ?? 0) > 1).length;
       const authored = graph(applyAllCodec, all);
       for (const c of [codec, otherCodec]) {
-        const g = graph(c, all);
+        const g = graph(c, all, [], applyAll);
         for (const p of all) {
           expect(g.version(p.time).toString()).toBe(authored.version(p.time).toString());
         }
@@ -209,7 +220,7 @@ describe("a history written before merge commits recorded their merged value", (
       patch(5, [4, 3], "A\nB\nC\n", "A\nB\nC\nd\n"),
     ];
     const snapshot: Patch = { ...ps[3], isSnapshot: true, snapshot: "A\nB\nc\n" };
-    const g = graph(codec, [...ps.slice(0, 3), snapshot, ps[4]]);
+    const g = graph(codec, [...ps.slice(0, 3), snapshot, ps[4]], [], applyAll);
     expect(g.version(id(5)).toString()).toBe("A\nB\nC\nd\n");
   });
 });
@@ -227,5 +238,156 @@ describe("undo of a merge commit", () => {
     const g = graph(codec, [e0, ea, eb, merge]);
     // Undo only the merge commit's own edit; the merge itself stays.
     expect(g.value({ withoutTimes: [merge.time] }).toString()).toBe("one TWO three four\n");
+  });
+});
+
+describe("unmarked merge commits", () => {
+  // Written by the Session of patchflow 0.9.3 (exact merges, no hashes, no
+  // recorded merged value): two writers append to "hello" concurrently, then
+  // one merges and adds a line. Its author saw "helloA\nhelloB\ntail\n".
+  const authored = "helloA\nhelloB\ntail\n";
+  const written: Patch[] = [
+    { time: "000000000rs_A", parents: [], patch: [[[[1, "hello\n"]], 0, 0, 0, 6]] },
+    {
+      time: "000000000ru_A",
+      parents: ["000000000rs_A"],
+      patch: [
+        [
+          [
+            [0, "hello"],
+            [1, "A"],
+            [0, "\n"],
+          ],
+          0,
+          0,
+          6,
+          7,
+        ],
+      ],
+    },
+    {
+      time: "000000000rw_B",
+      parents: ["000000000rs_A"],
+      patch: [
+        [
+          [
+            [0, "hello"],
+            [1, "B"],
+            [0, "\n"],
+          ],
+          0,
+          0,
+          6,
+          7,
+        ],
+      ],
+    },
+    {
+      time: "000000000ry_A",
+      parents: ["000000000ru_A", "000000000rw_B"],
+      patch: [
+        [
+          [
+            [0, "\nhelloB\n"],
+            [1, "tail\n"],
+          ],
+          6,
+          6,
+          8,
+          13,
+        ],
+      ],
+    },
+  ];
+
+  it("are read with merge3 by default, as patchflow 0.9 wrote them", () => {
+    expect(graph(codec, written).value().toString()).toBe(authored);
+  });
+
+  it("are read as patchflow 0.8 wrote them only when the application says so", () => {
+    // This history was not written that way, so that reading differs: which
+    // one is right is known only to the application.
+    expect(graph(codec, written, [], applyAll).value().toString()).not.toBe(authored);
+  });
+
+  it("read as patchflow 0.8 wrote them, each merge continues the previous replay", async () => {
+    // Rounds of: fork the last merge, one line on each side, merge. Reading
+    // every merge as it arrives applies each patch once, not the whole
+    // history again for every merge.
+    let now = 1000;
+    const clock = () => now++;
+    const make = async (id: string) => {
+      const s = new Session({
+        codec: applyAllCodec,
+        patchStore: new MemoryPatchStore(),
+        clock,
+        clientId: id,
+      });
+      await s.init();
+      return s;
+    };
+    const a = await make("a");
+    const b = await make("b");
+    const all: PatchEnvelope[] = [a.commit(doc("start\n"))];
+    b.applyRemote(all[0]);
+    const values = new Map<string, string>();
+    const rounds = 150;
+    for (let i = 0; i < rounds; i++) {
+      const l = a.commit(doc(`${a.getDocument()}L${i}\n`));
+      const r = b.commit(doc(`R${i}\n${b.getDocument()}`));
+      a.applyRemote(r);
+      const m = a.commit(doc(`${a.getDocument()}M${i}\n`));
+      b.applyRemoteBatch([l, m]);
+      all.push(l, r, m);
+      values.set(m.time, `${a.getDocument()}`);
+    }
+    expect(all.filter((p) => (p.parents?.length ?? 0) > 1 && p.hash == null)).toHaveLength(rounds);
+    let applied = 0;
+    const counting: DocCodec = {
+      ...codec,
+      applyPatch: (d, p) => {
+        applied++;
+        return d.applyPatch(p);
+      },
+      applyPatchBatch: (d, ps) => {
+        applied += ps.length;
+        return d.applyPatchBatch(ps);
+      },
+    };
+    const g = new PatchGraph({ codec: counting, ...applyAll });
+    g.add([all[0]]);
+    let checked = 0;
+    for (let i = 1; i < all.length; i += 3) {
+      const round = all.slice(i, i + 3);
+      g.add(round);
+      expect(g.value().toString()).toBe(values.get(round[2].time));
+      checked++;
+    }
+    expect(checked).toBe(rounds);
+    // Each patch is applied a bounded number of times (by the replay and by
+    // the exact values of the branches), not once per later merge.
+    expect(applied).toBeLessThan(4 * all.length);
+  });
+});
+
+describe("a merge commit with a parent not yet received", () => {
+  it("waits for it, although its merged value is recorded", async () => {
+    // Patches are delivered with their ancestors (see types.ts): a patch is
+    // held back until all its parents arrive, so every client has the same
+    // history below the patches it shows.
+    const [a, b] = await writers(codec, 2);
+    const e0 = a.commit(doc("base\n"));
+    b.applyRemote(e0);
+    const ea = a.commit(doc("base\nleft\n"));
+    const eb = b.commit(doc("base\nright\n"));
+    a.applyRemote(eb);
+    const merge = a.commit(doc(`${a.getDocument()}edit\n`));
+    const other = merge.mergeParent === ea.time ? eb : ea;
+    const rest = [e0, ea, eb].filter((p) => p !== other);
+    const g = graph(codec, [...rest, merge]);
+    expect(g.getValueHeads()).not.toContain(merge.time);
+    expect(g.needsMoreHistory()).toBe(true);
+    g.add([other]);
+    expect(g.value().toString()).toBe(`${a.getDocument()}`);
   });
 });

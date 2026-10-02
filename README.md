@@ -117,7 +117,7 @@ const codec = {
 
 A patch that merges concurrent heads (a merge commit, with several parents) is a diff from the merged value of its parents, like any patch. `Session` also records that merged value as its author computed it, as a diff from one of the parents (`Patch.mergeParent`, `Patch.mergePatch`), like a git merge commit records its merged tree. Computing the value of any patch in the history then needs no merge, so a later change to `merge3` only changes how new concurrent edits merge, never the values of patches already written; value hashes keep matching. Clients that do not know these fields read `patch` as before.
 
-Merge commits written before this (no `mergeParent` and no `hash`) were made by versions that applied every patch in time order; their values are computed the same way, from the patches their parents descend from, so the values of such a history do not change either.
+Merge commits written before this (no `mergeParent` and no `hash`) cannot tell which merge their author used, so the application says how its older history was written with the `unmarkedMerges` option of `Session`/`PatchGraph`: `"merge3"` (default; patchflow 0.9 exact merges) or `"apply-all"` (patchflow 0.8 and earlier, which applied every patch in time order). With `"apply-all"`, such a merge commit's value is computed the way its author computed it, from the patches its parents descend from, so the values of that history do not change either.
 
 ## Quickstart
 
