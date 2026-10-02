@@ -465,7 +465,7 @@ function alignLines(inserted: string[], deleted: string[]): [number, number][] {
   // edits of one line the closest wins; the same line outweighs any edit.
   const weight = (x: number, y: number): number => {
     if (inserted[x] === deleted[y]) return 2 + del[y].total;
-    const kept = editScore(del[y], ins[x]);
+    const kept = Math.max(editScore(del[y], ins[x]), charEditScore(deleted[y], inserted[x]));
     return kept > 0 ? 1 + kept : 0;
   };
   const w: number[][] = [];
@@ -575,7 +575,11 @@ function alignLinesGreedy(inserted: string[], deleted: string[]): [number, numbe
     const end = Math.min(deleted.length, y + ALIGN_LOOKAHEAD);
     const ins = wordProfile(inserted[x]);
     for (let k = y; k < end; k++) {
-      if (inserted[x] === deleted[k] || editScore(profile(k), ins) > 0) {
+      if (
+        inserted[x] === deleted[k] ||
+        editScore(profile(k), ins) > 0 ||
+        charEditScore(deleted[k], inserted[x]) > 0
+      ) {
         pairs.push([x, k]);
         y = k + 1;
         break;
@@ -592,6 +596,24 @@ function editScore(base: WordProfile, text: WordProfile): number {
   if (base.total === 0) return 0;
   const kept = keptOf(base, text);
   return kept * 3 >= base.total ? kept : 0;
+}
+
+// The length of the line `base` if `text` is `base` with text typed into it
+// (it keeps all of `base`, at its start and end), otherwise 0. Typing into a
+// word changes that word, so editScore no longer sees the line as an edit of
+// its base. Short lines are left to editScore: there a line containing
+// another ("t11" and "t1") is as likely a different line.
+const MIN_TYPED_LINE = 6;
+function charEditScore(base: string, text: string): number {
+  const n = base.length;
+  if (base.trim().length < MIN_TYPED_LINE || text.length <= n) return 0;
+  let prefix = 0;
+  while (prefix < n && base[prefix] === text[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < n - prefix && base[n - 1 - suffix] === text[text.length - 1 - suffix]) {
+    suffix++;
+  }
+  return prefix + suffix === n ? n : 0;
 }
 
 // The words (and punctuation) of a line, counted, with their total length.
@@ -712,8 +734,71 @@ function mergeWords(words: Chunk): string {
     combineAdjacent(words, true) ??
     resolveTrivial(words) ??
     disjointWordEdits(words) ??
+    disjointCharEdits(words) ??
     keepBoth(words)
   );
+}
+
+// Above this many characters, a conflicting chunk is not merged character by
+// character.
+const MAX_CHAR_MERGE = 10_000;
+
+// The edits of a character diff, one per run of changes.
+function charEdits(base: string, text: string): Edit[] {
+  const edits: Edit[] = [];
+  let cursor = 0;
+  let current: Edit | undefined;
+  for (const [op, run] of diffUnits(base, text)) {
+    if (op === 0) {
+      if (current) edits.push(current);
+      current = undefined;
+      cursor += run.length;
+      continue;
+    }
+    current ??= { from: cursor, to: cursor, insert: "" };
+    if (op === -1) {
+      current.to += run.length;
+      cursor += run.length;
+    } else {
+      current.insert += run;
+    }
+  }
+  if (current) edits.push(current);
+  return edits;
+}
+
+// Both sides typed into the same word or line, for example two people
+// adding characters at the end of one word: if their character edits do not
+// overlap, apply both. (Keeping both versions would repeat the whole word or
+// line for every keystroke typed concurrently.) Text both sides inserted at
+// one place is kept in a canonical order, so the merge stays symmetric; an
+// insertion inside text the other side replaced or deleted is a real
+// conflict and returns undefined.
+function disjointCharEdits(chunk: Chunk): string | undefined {
+  const { base } = chunk;
+  if (base === "" || base.length + chunk.a.length + chunk.b.length > MAX_CHAR_MERGE) {
+    return undefined;
+  }
+  const merged = charEdits(base, chunk.a);
+  for (const e of charEdits(base, chunk.b)) {
+    const same = (x: Edit) => x.from === e.from && x.to === e.to && x.insert === e.insert;
+    if (merged.some(same)) continue;
+    const at = isInsertion(e) ? merged.findIndex((x) => isInsertion(x) && x.from === e.from) : -1;
+    if (at !== -1) {
+      const x = merged[at].insert;
+      merged[at] = { ...e, insert: x <= e.insert ? x + e.insert : e.insert + x };
+      continue;
+    }
+    const clash = (x: Edit) => {
+      if (isInsertion(x)) return e.from < x.from && x.from < e.to;
+      if (isInsertion(e)) return x.from < e.from && e.from < x.to;
+      return x.from < e.to && e.from < x.to;
+    };
+    if (merged.some(clash)) return undefined;
+    merged.push(e);
+  }
+  merged.sort((x, y) => x.from - y.from || x.to - y.to);
+  return applyEdits(base, merged);
 }
 
 // Both sides changed words of a chunk, but different ones (for example,

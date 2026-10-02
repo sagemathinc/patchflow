@@ -50,8 +50,39 @@ describe("mergeStrings3", () => {
     expect(merge("the cat sat", "the dog sat", "the cow sat")).toBe("the cow dog sat");
   });
 
-  it("keeps both versions of a word both sides changed", () => {
-    expect(merge("hello world", "hxello world", "helloy world")).toBe("helloy hxello world");
+  // Merged in both argument orders, which must agree.
+  const both = (base: string, a: string, b: string) => {
+    const result = merge(base, a, b);
+    expect(merge(base, b, a)).toBe(result);
+    return result;
+  };
+
+  it("applies both sides' typing in the same word", () => {
+    // Before, both versions of the word were kept: every keystroke two people
+    // typed concurrently repeated the whole word (or line).
+    expect(both("hello world", "hxello world", "helloy world")).toBe("hxelloy world");
+    expect(both("x blahlkjj\n", "x blahlkjj1\n", "x blahlkjja\n")).toBe("x blahlkjj1a\n");
+  });
+
+  it("merges two people typing at the end of a line of a notebook cell", () => {
+    const base = "# hi - blah blahjj\nfrom pylab import plot\nplot([1,2,3])\n";
+    const at = (typed: string) => base.replace("blahjj", `blahjj${typed}`);
+    expect(both(base, at("1"), at("a"))).toBe(at("1a"));
+    // Several keystrokes each, as when both keep typing before syncing.
+    expect(both(base, at("123"), at("abc"))).toBe(at("123abc"));
+  });
+
+  it("applies a character typed and one deleted elsewhere in the same word", () => {
+    // One side typed an "o", the other deleted one: both apply.
+    expect(both("hello world\n", "helloo world\n", "hell world\n")).toBe("hello world\n");
+    expect(both("abcdef ghi\n", "abXcdef ghi\n", "abcde ghi\n")).toBe("abXcde ghi\n");
+  });
+
+  it("still keeps both versions when both sides replaced the same characters", () => {
+    expect(both("a cat b\n", "a dog b\n", "a cow b\n")).toBe("a cow dog b\n");
+    expect(both("The Color of Pomegranates\n", "", "The Colour of Pomegranates\n")).toBe(
+      "The Colour of Pomegranates",
+    );
   });
 
   it("never splices the characters of two conflicting words", () => {
