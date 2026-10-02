@@ -58,6 +58,35 @@ function isRoot(patch: Patch): boolean {
   return (patch.parents ?? []).length === 0 && !(patch.isSnapshot && patch.snapshot != null);
 }
 
+// A merge commit (several parents) that does not record its merged value
+// (see Patch.mergeParent) and has no hash, so was written either by a version that merged
+// concurrent patches by applying them all in time order, or with the value of
+// that same fallback (see Session.commit). Its value is computed the way its
+// author computed the value it is a diff from (see legacyValueOfSet), not
+// with merge3, so a history written before exact merges keeps its values.
+function isLegacyMerge(patch: Patch): boolean {
+  return (
+    (patch.parents?.length ?? 0) > 1 &&
+    patch.mergeParent == null &&
+    patch.hash == null &&
+    patch.patch != null
+  );
+}
+
+// The parent from which a merge commit records its merged value (see
+// Patch.mergeParent), if it does.
+function mergeParent(patch: Patch): string | undefined {
+  const parent = patch.mergeParent;
+  if (parent == null || patch.mergePatch == null) return undefined;
+  return (patch.parents ?? []).includes(parent) ? parent : undefined;
+}
+
+// The patches whose exact values a patch's value is computed from.
+function valueParents(patch: Patch): string[] {
+  const parent = mergeParent(patch);
+  return parent != null ? [parent] : (patch.parents ?? []);
+}
+
 function patchCmp(a: Patch, b: Patch): number {
   return comparePatchId(a.time, b.time);
 }
@@ -374,13 +403,23 @@ export class PatchGraph {
       const patch = this.patches.get(time)!;
       if (patch.isSnapshot || patch.patch == null) continue;
       const after = this.exactValue(time);
-      const parents = patch.parents ?? [];
-      const before =
-        parents.length === 0 ? this.codec.fromString("") : this.exactValueOfSet(parents);
+      const before = this.parentsValue(patch);
       if (after == null || before == null) return undefined;
       doc = merge3(after, doc, before);
     }
     return doc;
+  }
+
+  // The value a patch is a diff from: the merged value of its parents, as
+  // its author computed it (see Patch.mergeParent and isLegacyMerge).
+  private parentsValue(patch: Patch): Document | undefined {
+    const parents = patch.parents ?? [];
+    if (parents.length === 0) return this.codec.fromString("");
+    if (isLegacyMerge(patch)) return this.legacyValueOfSet(parents);
+    const recorded = mergeParent(patch);
+    if (recorded == null) return this.exactValueOfSet(parents);
+    const value = this.exactValue(recorded);
+    return value == null ? undefined : this.codec.applyPatch(value, patch.mergePatch);
   }
 
   // The caller knows it has every patch from the start of the history (e.g.
@@ -815,7 +854,7 @@ export class PatchGraph {
       }
       if (state === "bad") rejected.push(t);
       const below = needed || state === "bad";
-      for (const parent of patch.parents ?? []) stack.push({ t: parent, needed: below });
+      for (const parent of valueParents(patch)) stack.push({ t: parent, needed: below });
     }
     // Loaded ancestors are not enough: rebuilding a rejected snapshot's value
     // can also need the common ancestors of its parents (which the walk above
@@ -916,7 +955,10 @@ export class PatchGraph {
       // patch is not loaded, the exact value is unknown until more history is
       // (see needsMoreHistory).
       if (snapshot === "bad" && patch.patch == null) return undefined;
-      for (const parent of patch.parents ?? []) {
+      // A legacy merge commit's value is computed from its parents' history,
+      // not from their exact values (see legacyValueOfSet).
+      if (isLegacyMerge(patch)) continue;
+      for (const parent of valueParents(patch)) {
         if (!this.patches.has(parent)) return undefined;
         uses.set(parent, (uses.get(parent) ?? 0) + 1);
         if (!visited.has(parent)) stack.push({ t: parent, expanded: false });
@@ -931,12 +973,19 @@ export class PatchGraph {
       const patch = this.patches.get(t)!;
       let doc: Document | undefined;
       const useSnapshot = this.snapshotState(patch) === "use";
-      const parents = useSnapshot ? [] : (patch.parents ?? []);
+      const legacy = !useSnapshot && isLegacyMerge(patch);
+      const parents = useSnapshot || legacy ? [] : valueParents(patch);
       if (useSnapshot) {
         doc = this.codec.fromString(patch.snapshot!);
       } else {
         let base: Document | undefined;
-        if (parents.length === 0) {
+        const recorded = mergeParent(patch);
+        if (legacy) {
+          base = this.legacyValueOfSet(patch.parents!);
+        } else if (recorded != null) {
+          const value = get(recorded) ?? this.exactValue(recorded);
+          base = value == null ? undefined : this.codec.applyPatch(value, patch.mergePatch);
+        } else if (parents.length === 0) {
           base = this.codec.fromString("");
         } else if (parents.length === 1) {
           base = get(parents[0]) ?? this.exactValue(parents[0]);
@@ -960,6 +1009,77 @@ export class PatchGraph {
       this.pinnedExact?.set(time, doc);
     }
     return doc;
+  }
+
+  // The value a legacy merge commit (see isLegacyMerge) is a diff from, as its
+  // author computed it: every patch its parents descend from applied in time
+  // order, as every version before exact merges computed the value of
+  // concurrent patches, so the merge commit gets the value its author saw.
+  // Starts from the newest snapshot among them that already contains every
+  // older one of them (a snapshot made after concurrent patches does not;
+  // starting from it would drop them). Undefined if a patch needed for it is
+  // not loaded. This must never change: it defines the values of histories
+  // written by those versions.
+  private legacyValueOfSet(times: string[]): Document | undefined {
+    const sorted = this.sortHeads(Array.from(new Set(times)));
+    const key = `legacy:${sorted.join(",")}`;
+    const cached =
+      this.pinnedMerged?.get(key) ??
+      this.recentMerged.get(key) ??
+      this.exactMergeCache.get(key)?.doc;
+    if (cached) return cached;
+    const skipped = new Set<string>();
+    let reachable: Set<string>;
+    let snapshot: Patch | undefined;
+    for (;;) {
+      reachable = new Set<string>();
+      const stack = [...sorted];
+      while (stack.length > 0) {
+        const t = stack.pop()!;
+        if (reachable.has(t)) continue;
+        const patch = this.patches.get(t);
+        if (patch == null) return undefined;
+        reachable.add(t);
+        if (this.snapshotState(patch) === "use" && !skipped.has(t)) continue;
+        if (patch.isSnapshot && patch.patch == null) return undefined;
+        stack.push(...(patch.parents ?? []));
+      }
+      snapshot = this.latestSnapshot(Array.from(reachable).filter((t) => !skipped.has(t)));
+      if (snapshot == null) break;
+      const floor = snapshot.time;
+      const older = Array.from(reachable).filter((t) => comparePatchId(t, floor) < 0);
+      if (older.length === 0) break;
+      const above = this.ancestorsSince(floor, older.sort(comparePatchId)[0]);
+      if (older.every((t) => above.has(t))) break;
+      skipped.add(floor);
+    }
+    const floor = snapshot?.time;
+    const ordered = Array.from(reachable)
+      .filter((t) => floor == null || comparePatchId(t, floor) > 0)
+      .map((t) => this.patches.get(t)!)
+      .sort(patchCmp);
+    this.dedupFileLoads(ordered);
+    const patches = ordered.filter((p) => p.patch != null).map((p) => p.patch);
+    let doc = snapshot ? this.codec.fromString(snapshot.snapshot!) : this.codec.fromString("");
+    if (patches.length > 0) doc = this.codec.applyPatchBatch(doc, patches);
+    this.exactMergeCache.set(key, { doc });
+    remember(this.recentMerged, key, doc);
+    this.pinnedMerged?.set(key, doc);
+    return doc;
+  }
+
+  // The loaded ancestors of a patch that are not older than `oldest` (parents
+  // are older than their children, so the walk stops there).
+  private ancestorsSince(time: string, oldest: string): Set<string> {
+    const found = new Set<string>();
+    const stack = [...(this.patches.get(time)?.parents ?? [])];
+    while (stack.length > 0) {
+      const t = stack.pop()!;
+      if (found.has(t) || comparePatchId(t, oldest) < 0) continue;
+      found.add(t);
+      stack.push(...(this.patches.get(t)?.parents ?? []));
+    }
+    return found;
   }
 
   // Exact merged value of a set of patches (heads or a merge patch's parents):

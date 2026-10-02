@@ -113,6 +113,12 @@ const codec = {
 
 `mergeStrings3` is a line-oriented diff3 that never relocates edits by fuzzy matching, keeps whatever either side typed (a duplicate is visible and easy to fix, lost text is not), never splices characters of different words or lines together, and is symmetric in its two sides. When the history needed for an exact value is not loaded (e.g., below a snapshot), the graph falls back to the default algorithm.
 
+### Merge commits record their merged value
+
+A patch that merges concurrent heads (a merge commit, with several parents) is a diff from the merged value of its parents, like any patch. `Session` also records that merged value as its author computed it, as a diff from one of the parents (`Patch.mergeParent`, `Patch.mergePatch`), like a git merge commit records its merged tree. Computing the value of any patch in the history then needs no merge, so a later change to `merge3` only changes how new concurrent edits merge, never the values of patches already written; value hashes keep matching. Clients that do not know these fields read `patch` as before.
+
+Merge commits written before this (no `mergeParent` and no `hash`) were made by versions that applied every patch in time order; their values are computed the same way, from the patches their parents descend from, so the values of such a history do not change either.
+
 ## Quickstart
 
 ```sh
