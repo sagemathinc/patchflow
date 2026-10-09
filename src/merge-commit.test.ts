@@ -119,7 +119,7 @@ describe("merge commits record their merged value", () => {
   it("needs only the parent it records the merged value from", async () => {
     const { patches, merge } = await history();
     const g = graph(otherCodec, patches);
-    const spy = jest.spyOn(otherCodec, "merge3");
+    const spy = vi.spyOn(otherCodec, "merge3");
     expect(g.version(merge.time).toString()).toBe("one TWO three four\nfive\n");
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();

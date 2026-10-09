@@ -2,7 +2,7 @@
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "env": {
     "es2022": true,
-    "jest": true,
+    "vitest": true,
     "node": true
   },
   "ignorePatterns": ["dist/**", "node_modules/**", "coverage/**"]
