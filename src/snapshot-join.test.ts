@@ -252,7 +252,7 @@ describe("loading from a snapshot", () => {
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(report));
     expect(failures).toEqual([]);
-  });
+  }, 120_000); // a synchronous fuzz: about 16 s (jest did not time synchronous tests; vitest does)
 });
 
 describe("a session that receives the snapshotted patch last", () => {
