@@ -1,4 +1,3 @@
-import { List, Map } from "immutable";
 import { LRUCache } from "lru-cache";
 import { comparePatchId, decodePatchId } from "./patch-id";
 import type {
@@ -11,7 +10,7 @@ import type {
 } from "./types";
 import { hashString, sameHashFormat } from "./value-hash";
 
-type PatchMap = Map<string, Patch>;
+type PatchMap = Map<string, Patch>; // (native maps: patch-graph does not need immutable.js)
 
 const DEFAULT_DEDUP_TOLERANCE = 3000;
 const DEFAULT_VALUE_CACHE_MAX_ENTRIES = 100;
@@ -49,6 +48,14 @@ function docSize(value: { doc: Document }): number {
 }
 
 // Keep `doc` as the most recent entry of a small insertion-ordered map.
+// Element by element, as immutable.js's List(a).equals(List(b)) compared them
+// (values with Object.is; nested arrays and objects by identity).
+function sameElements(a: unknown[], b: unknown[]): boolean {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false;
+  return true;
+}
+
 function remember(map: globalThis.Map<string, Document>, key: string, doc: Document): void {
   map.delete(key);
   map.set(key, doc);
@@ -102,8 +109,8 @@ function patchCmp(a: Patch, b: Patch): number {
 }
 
 export class PatchGraph {
-  private patches: PatchMap = Map<string, Patch>();
-  private children: Map<string, Set<string>> = Map<string, Set<string>>();
+  private patches: PatchMap = new Map<string, Patch>();
+  private children: Map<string, Set<string>> = new Map<string, Set<string>>();
   private codec: DocCodec;
   public fileTimeDedupTolerance = DEFAULT_DEDUP_TOLERANCE;
   private mergeStrategy: MergeStrategy;
@@ -506,7 +513,7 @@ export class PatchGraph {
   }
 
   private computeHeads(): string[] {
-    const allTimes = new Set(this.patches.keySeq().toArray());
+    const allTimes = new Set(this.patches.keys());
     const parents = new Set<string>();
     this.patches.forEach((patch) => {
       for (const p of patch.parents ?? []) {
@@ -598,10 +605,9 @@ export class PatchGraph {
   versions(opts: { start?: string; end?: string } = {}): string[] {
     const { start, end } = opts;
     if (this.versionsCache == null) {
-      this.versionsCache = this.patches
-        .toArray()
-        .map(([, patch]) => patch.time)
-        .sort(comparePatchId);
+      this.versionsCache = Array.from(this.patches.values(), (patch) => patch.time).sort(
+        comparePatchId,
+      );
     }
     return this.versionsCache.filter((t) => {
       if (start != null && comparePatchId(t, start) < 0) return false;
@@ -1383,7 +1389,7 @@ export class PatchGraph {
       patch.patch &&
       decodePatchId(patch.time).timeMs - decodePatchId(last.time).timeMs <=
         this.fileTimeDedupTolerance &&
-      List<unknown>(patch.patch as unknown[]).equals(List<unknown>(last.patch as unknown[]))
+      sameElements(patch.patch as unknown[], last.patch as unknown[])
     );
   }
 
@@ -1407,9 +1413,7 @@ export class PatchGraph {
 
   history(opts: { start?: string; end?: string; includeSnapshots?: boolean } = {}): Patch[] {
     const { start, end, includeSnapshots = true } = opts;
-    return this.patches
-      .toArray()
-      .map(([, patch]) => patch)
+    return Array.from(this.patches.values())
       .filter((p) => {
         if (start != null && comparePatchId(p.time, start) < 0) return false;
         if (end != null && comparePatchId(p.time, end) > 0) return false;

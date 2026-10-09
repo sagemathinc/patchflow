@@ -5,6 +5,7 @@
   "description": "Lightweight patch-based directed acyclic graph realtime sync core",
   "license": "MIT",
   "type": "module",
+  "sideEffects": false,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sagemathinc/patchflow.git"
