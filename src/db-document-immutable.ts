@@ -25,7 +25,7 @@ import {
 import type { DocCodec, Document } from "./types";
 
 // (immutable.js helpers, here so that db-util.ts does not import immutable)
-export function mergeSet(
+function mergeSet(
   obj: ImMap<string, unknown>,
   change: ImMap<string, unknown>,
 ): ImMap<string, unknown> {
@@ -39,7 +39,7 @@ export function mergeSet(
   return obj;
 }
 
-export function nonnullCols(f: ImMap<string, unknown>): ImMap<string, unknown> {
+function nonnullCols(f: ImMap<string, unknown>): ImMap<string, unknown> {
   return ImMap(f.filter((v) => v !== null));
 }
 

@@ -9,6 +9,7 @@ import type {
   PatchGraphValueOptions,
 } from "./types";
 import { hashString, sameHashFormat } from "./value-hash";
+import { sameElements } from "./same-elements";
 
 type PatchMap = Map<string, Patch>; // (native maps: patch-graph does not need immutable.js)
 
@@ -48,14 +49,6 @@ function docSize(value: { doc: Document }): number {
 }
 
 // Keep `doc` as the most recent entry of a small insertion-ordered map.
-// Element by element, as immutable.js's List(a).equals(List(b)) compared them
-// (values with Object.is; nested arrays and objects by identity).
-function sameElements(a: unknown[], b: unknown[]): boolean {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false;
-  return true;
-}
-
 function remember(map: globalThis.Map<string, Document>, key: string, doc: Document): void {
   map.delete(key);
   map.set(key, doc);
@@ -1389,7 +1382,7 @@ export class PatchGraph {
       patch.patch &&
       decodePatchId(patch.time).timeMs - decodePatchId(last.time).timeMs <=
         this.fileTimeDedupTolerance &&
-      sameElements(patch.patch as unknown[], last.patch as unknown[])
+      sameElements(patch.patch, last.patch)
     );
   }
 
