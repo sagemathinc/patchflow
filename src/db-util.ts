@@ -1,12 +1,20 @@
-import { Map as ImMap } from "immutable";
 import jsonstable from "fast-json-stable-stringify";
 import deepEqual from "fast-deep-equal/es6";
 export { deepEqual };
 
 export type JsMap = Record<string, unknown>;
 
+// An immutable.js Map (or OrderedMap), recognized as Map.isMap does, without
+// importing immutable: the immer documents never need it.
+const IS_IMMUTABLE_MAP = "@@__IMMUTABLE_MAP__@@";
+function isImmutableMap(value: unknown): value is { toJS(): unknown } {
+  return (
+    !!value && typeof value === "object" && !!(value as Record<string, unknown>)[IS_IMMUTABLE_MAP]
+  );
+}
+
 export function toKey(value: unknown): string {
-  if (ImMap.isMap(value)) {
+  if (isImmutableMap(value)) {
     value = value.toJS();
   }
   // must be stable, especially if value contains objects, which is technically allowed
@@ -32,24 +40,6 @@ export function mapMergePatch(obj1: JsMap, obj2: JsMap): JsMap {
     change[key] = obj2[key];
   }
   return change;
-}
-
-export function mergeSet(
-  obj: ImMap<string, unknown>,
-  change: ImMap<string, unknown>,
-): ImMap<string, unknown> {
-  change.forEach((v, k) => {
-    if (v === null || v == null) {
-      obj = obj.delete(k);
-    } else {
-      obj = obj.set(k, v);
-    }
-  });
-  return obj;
-}
-
-export function nonnullCols(f: ImMap<string, unknown>): ImMap<string, unknown> {
-  return ImMap(f.filter((v) => v !== null));
 }
 
 export function isArray(x: unknown): x is unknown[] {

@@ -18,13 +18,30 @@ import {
   isArray,
   isObject,
   mapMergePatch,
-  mergeSet,
-  nonnullCols,
   toKey,
   toStr,
   type JsMap,
 } from "./db-util";
 import type { DocCodec, Document } from "./types";
+
+// (immutable.js helpers, here so that db-util.ts does not import immutable)
+function mergeSet(
+  obj: ImMap<string, unknown>,
+  change: ImMap<string, unknown>,
+): ImMap<string, unknown> {
+  change.forEach((v, k) => {
+    if (v === null || v == null) {
+      obj = obj.delete(k);
+    } else {
+      obj = obj.set(k, v);
+    }
+  });
+  return obj;
+}
+
+function nonnullCols(f: ImMap<string, unknown>): ImMap<string, unknown> {
+  return ImMap(f.filter((v) => v !== null));
+}
 
 const DEFAULT_JSONL_SIZE_FACTOR = 1000;
 
