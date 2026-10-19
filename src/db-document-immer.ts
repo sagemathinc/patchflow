@@ -11,16 +11,7 @@ import { hashRecords } from "./value-hash";
 import { enableMapSet, produce, type Draft } from "immer";
 import { applyPatch as applyStringPatch, makePatch as makeStringPatch } from "./dmp";
 import type { CompressedPatch } from "./dmp";
-import {
-  deepEqual,
-  isArray,
-  isObject,
-  len,
-  mapMergePatch,
-  toKey,
-  toStr,
-  type JsMap,
-} from "./db-util";
+import { deepEqual, isArray, isObject, mapMergePatch, toKey, toStr, type JsMap } from "./db-util";
 import type { DocCodec, Document } from "./types";
 
 const DEFAULT_JSONL_SIZE_FACTOR = 1000;
@@ -154,8 +145,7 @@ export class DbDocumentImmer implements Document {
         };
 
         const selectWithIndexes = (where: WhereCondition): Set<number> => {
-          const n = len(where as JsMap);
-          let result: Set<number> | undefined;
+          const found: Set<number>[] = [];
           for (const field in where) {
             const value = where[field];
             const index = indexes.get(field);
@@ -164,8 +154,19 @@ export class DbDocumentImmer implements Document {
             }
             const matches = index.get(toKey(value));
             if (!matches) return new Set();
-            if (n === 1) return new Set(matches);
-            result = result ? this.intersect(result, matches) : new Set(matches);
+            found.push(matches);
+          }
+          let result: Set<number> | undefined;
+          if (found.length > 0) {
+            // As select() does: filter the smallest set by the others, so a
+            // key field shared by many records (e.g. a type) does not make
+            // each lookup, and a patch of n records n^2, cost that many.
+            found.sort((a, b) => a.size - b.size);
+            const [smallest, ...others] = found;
+            result = new Set();
+            for (const idx of smallest) {
+              if (others.every((other) => other.has(idx))) result.add(idx);
+            }
           }
           if (!result) {
             result = new Set();
