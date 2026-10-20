@@ -385,8 +385,9 @@ describe("previewCommit", () => {
       let envelope: PatchEnvelope;
       if (previewed) {
         const preview = a.previewCommit(next);
-        // One patch and 8 candidate merge diffs, all in the preview.
-        expect(counts.diffs).toBe(9);
+        // One patch and 2 candidate merge diffs (MAX_MERGE_PARENT_CANDIDATES),
+        // all in the preview.
+        expect(counts.diffs).toBe(3);
         const diffs = counts.diffs;
         envelope = a.commit(next, { preview });
         expect(counts.diffs).toBe(diffs);
