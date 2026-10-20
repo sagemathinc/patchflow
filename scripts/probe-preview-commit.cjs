@@ -4,16 +4,22 @@
 //
 //   node scripts/probe-preview-commit.cjs
 //
-// Reports wall time of the final commit (or preview + commit) and the bytes
-// it allocated (heap used after it, no GC run during it, minus heap used
-// before it, after a full GC).
+// Reports, for the final commit (or preview + commit) only:
+// - ms: wall time;
+// - heapMB: heap used after it minus heap used before it (after a full GC;
+//   misses garbage collected during it);
+// - abMB / extMB: the same for ArrayBuffer and external memory;
+// - peakRssMB: the process's peak RSS (maxRSS) after it, and peakRssDeltaMB
+//   how much it raised the peak reached before it (0 if it stayed below).
+// Shapes: "single" (a large single-head commit), "merge8" (an 8-head merge)
+// and "binary" (the large single-head commit with a Uint8Array patch).
 const { execFileSync } = require("node:child_process");
 
 if (process.argv[2] === "child") {
   child(process.argv[3], process.argv[4]);
 } else {
   const rows = [];
-  for (const shape of ["single", "merge8"]) {
+  for (const shape of ["single", "binary", "merge8"]) {
     for (const mode of ["plain", "preview"]) {
       const out = execFileSync(
         process.execPath,
@@ -29,8 +35,20 @@ if (process.argv[2] === "child") {
 function child(shape, mode) {
   const pf = require("../dist/cjs/index.js");
   const doc = (s) => new pf.StringDocument(s);
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const toBytes = (p) => enc.encode(JSON.stringify(p));
+  const fromBytes = (p) => JSON.parse(dec.decode(p));
+  const binary = shape === "binary";
   const codec = {
     ...pf.StringCodec,
+    ...(binary
+      ? {
+          makePatch: (a, b) => toBytes(pf.StringCodec.makePatch(a, b)),
+          applyPatch: (d, p) => pf.StringCodec.applyPatch(d, fromBytes(p)),
+          applyPatchBatch: (d, ps) => pf.StringCodec.applyPatchBatch(d, ps.map(fromBytes)),
+        }
+      : {}),
     merge3: (base, a, b, ancestors) =>
       doc(
         pf.mergeStrings3({
@@ -58,7 +76,7 @@ function child(shape, mode) {
   (async () => {
     let a;
     let next;
-    if (shape === "single") {
+    if (shape === "single" || shape === "binary") {
       a = await mk("a");
       a.commit(doc(big));
       now += 1;
@@ -90,7 +108,8 @@ function child(shape, mode) {
     }
     global.gc();
     global.gc();
-    const before = process.memoryUsage().heapUsed;
+    const before = process.memoryUsage();
+    const peakBefore = process.resourceUsage().maxRSS;
     const t0 = process.hrtime.bigint();
     let envelope;
     if (mode === "preview") {
@@ -100,14 +119,24 @@ function child(shape, mode) {
       envelope = a.commit(next);
     }
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    const allocated = process.memoryUsage().heapUsed - before;
+    const after = process.memoryUsage();
+    const peakAfter = process.resourceUsage().maxRSS;
+    const mb = (bytes) => +(bytes / 2 ** 20).toFixed(1);
     process.stdout.write(
       JSON.stringify({
         shape,
         mode,
         ms: Math.round(ms),
-        allocatedMB: +(allocated / 2 ** 20).toFixed(1),
-        envelopeKB: Math.round(JSON.stringify(envelope).length / 1024),
+        heapMB: mb(after.heapUsed - before.heapUsed),
+        abMB: mb(after.arrayBuffers - before.arrayBuffers),
+        extMB: mb(after.external - before.external),
+        peakRssMB: mb(peakAfter * 1024),
+        peakRssDeltaMB: mb((peakAfter - peakBefore) * 1024),
+        patchKB: Math.round(
+          (envelope.patch instanceof Uint8Array
+            ? envelope.patch.byteLength
+            : JSON.stringify(envelope.patch).length) / 1024,
+        ),
         parents: envelope.parents.length,
       }),
     );

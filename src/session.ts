@@ -55,9 +55,10 @@ export class Session extends EventEmitter {
   private readonly codec: DocCodec;
   private readonly patchStore: PatchStore;
   private readonly clock: () => number;
-  // For each preview handed out by previewCommit: the session's own copy of
-  // the envelope (what commit appends) and what it was computed from.
-  private readonly previews = new WeakMap<PatchEnvelope, Preview>();
+  // The one active preview (previewCommit): the copy handed out, the
+  // session's own copy of the envelope (what commit appends) and what it
+  // was computed from.
+  private activePreview?: { shown: PatchEnvelope; preview: Preview };
   private readonly graph: PatchGraph;
   private readonly fileAdapter?: FileAdapter;
   private readonly presenceAdapter?: PresenceAdapter;
@@ -168,6 +169,7 @@ export class Session extends EventEmitter {
   // Tear down subscriptions and presence when done.
   close(): void {
     this.closed = true;
+    this.activePreview = undefined;
     if (this.resumeRetryTimer != null) {
       clearTimeout(this.resumeRetryTimer);
       this.resumeRetryTimer = undefined;
@@ -395,11 +397,20 @@ export class Session extends EventEmitter {
   // document, logical time, versions, undo), appends nothing and emits no
   // events. It reads the clock once, as any commit must, and commit with
   // the preview doesn't read it again: an injected clock that advances on
-  // every read (e.g. a test clock) sees one read per preview. It can fill
-  // the graph's caches as a commit would: the sorted list of patch ids (one
-  // entry per patch, dropped when a patch is added) and exact values (LRU
-  // caches with entry and size limits), so a preview never grows memory
-  // beyond what one commit could.
+  // every read (e.g. a test clock) sees one read per preview.
+  //
+  // A session has at most one active preview. A new preview, committing
+  // it (whether or not that succeeds), cancelPreview() or close() ends it
+  // and releases the session's copy; committing an ended preview throws.
+  // (A preview that went out of date stays held, refused at commit, until
+  // one of these.) So previews hold at most one envelope (the session's
+  // copy) and one nextDoc at a time, plus whatever the caller keeps of the
+  // copies it was given. While a preview
+  // is made, three copies of the envelope exist (the one built, the
+  // session's and the caller's). Previewing can also fill the graph's
+  // caches as a commit would: the sorted list of patch ids (one entry per
+  // patch, dropped when a patch is added) and exact values (LRU caches with
+  // entry and size limits).
   //
   // It is the object handed to PatchStore.append, field for field. How the
   // store encodes and frames it is up to the store: a caller limiting the
@@ -415,29 +426,44 @@ export class Session extends EventEmitter {
     this.assertValueAvailable();
     const wall = this.clock();
     const timeMs = Math.max(wall, this.lastTimeMs + 1);
+    // Released before building the next one.
+    this.activePreview = undefined;
     // Owned copies: nothing the caller holds (opts.meta, the result) can
     // change what is committed.
     const envelope = ownedCopy(this.buildEnvelope(nextDoc, opts, timeMs, wall));
     const shown = deepFreeze(ownedCopy(envelope));
-    this.previews.set(shown, {
-      envelope,
-      nextDoc,
-      file: opts.file,
-      source: opts.source,
-      at: this.previewState(),
-    });
+    this.activePreview = {
+      shown,
+      preview: {
+        envelope,
+        nextDoc,
+        file: opts.file,
+        source: opts.source,
+        at: this.previewState(),
+      },
+    };
     return shown;
   }
 
+  // End the active preview, if any (see previewCommit), releasing the
+  // session's copy of it. With a preview, only if it is the active one.
+  cancelPreview(preview?: PatchEnvelope): void {
+    if (preview == null || this.activePreview?.shown === preview) {
+      this.activePreview = undefined;
+    }
+  }
+
   // What the envelope of a commit depends on besides nextDoc, opts and the
-  // clock. (The base document matters only without exact values, and a new
-  // committed document or working copy is a new object.)
+  // clock, and can change without a commit attempt: the graph (its
+  // revision; the version counter changes only with it, and userId never),
+  // the logical time (which a failed commit can advance), and the document
+  // a patch is made against when the parents' exact value is unknown (undo,
+  // redo and a working copy change it without changing the graph; each is a
+  // new object).
   private previewState(): PreviewState {
     return {
       revision: this.graph.revision(),
       lastTimeMs: this.lastTimeMs,
-      maxVersion: this.maxVersion,
-      userId: this.userId,
       base: this.workingCopy?.base ?? this.committedDoc!,
     };
   }
@@ -448,20 +474,17 @@ export class Session extends EventEmitter {
     opts: { file?: boolean; source?: string; meta?: PatchEnvelope["meta"] },
     shown: PatchEnvelope,
   ): PatchEnvelope {
-    const preview = this.previews.get(shown);
-    this.previews.delete(shown);
-    if (preview == null) {
+    // Only the active preview can be committed; it is ended (released)
+    // whether or not the commit succeeds.
+    const active = this.activePreview;
+    if (active?.shown !== shown) {
       throw new Error("the previewed commit is out of date");
     }
+    this.activePreview = undefined;
+    const preview = active.preview;
     const now = this.previewState();
     const at = preview.at;
-    if (
-      at.revision !== now.revision ||
-      at.lastTimeMs !== now.lastTimeMs ||
-      at.maxVersion !== now.maxVersion ||
-      at.userId !== now.userId ||
-      at.base !== now.base
-    ) {
+    if (at.revision !== now.revision || at.lastTimeMs !== now.lastTimeMs || at.base !== now.base) {
       throw new Error("the previewed commit is out of date");
     }
     if (
@@ -472,7 +495,9 @@ export class Session extends EventEmitter {
     ) {
       throw new Error("the commit differs from its preview");
     }
-    // The caller's copy is frozen, but a binary patch can't be.
+    // The caller's copy is frozen, but a binary patch can't be. (Time
+    // linear in the envelope, stack depth that of its nesting, no values
+    // copied; nextDoc.isEqual above costs what the codec's does.)
     if (!sameValue(shown, preview.envelope)) {
       throw new Error("the preview was modified");
     }
@@ -936,8 +961,6 @@ export class Session extends EventEmitter {
 interface PreviewState {
   revision: number;
   lastTimeMs: number;
-  maxVersion: number;
-  userId: number;
   base: Document;
 }
 
@@ -958,8 +981,17 @@ function ownedCopy<T>(value: T): T {
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
     throw new Error("a patch envelope holds only JSON values and Uint8Array patches");
   }
+  // Own keys only, each defined as data: an own "__proto__" key is a key
+  // like any other, not the prototype.
   const copy: Record<string, unknown> = {};
-  for (const [key, v] of Object.entries(value)) copy[key] = ownedCopy(v);
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(copy, key, {
+      value: ownedCopy((value as Record<string, unknown>)[key]),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
   return copy as T;
 }
 
@@ -971,7 +1003,9 @@ function deepFreeze<T>(value: T): T {
 }
 
 // Equal as stored: the same JSON values and bytes, where an undefined field
-// is the same as a missing one (JSON drops it). Allocates nothing.
+// is the same as a missing one (JSON drops it). Time linear in the values,
+// stack depth that of their nesting; it copies no values (only each
+// object's list of keys).
 function sameValue(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a == null || b == null || typeof a !== "object" || typeof b !== "object") {
@@ -992,14 +1026,17 @@ function sameValue(a: unknown, b: unknown): boolean {
   }
   const ao = a as Record<string, unknown>;
   const bo = b as Record<string, unknown>;
+  // Own keys only (never inherited ones).
   let defined = 0;
-  for (const key in ao) {
+  for (const key of Object.keys(ao)) {
     if (ao[key] === undefined) continue;
     defined += 1;
-    if (!Object.prototype.hasOwnProperty.call(bo, key) || !sameValue(ao[key], bo[key])) {
-      return false;
-    }
+    if (!hasOwn(bo, key) || !sameValue(ao[key], bo[key])) return false;
   }
-  for (const key in bo) if (bo[key] !== undefined) defined -= 1;
+  for (const key of Object.keys(bo)) if (bo[key] !== undefined) defined -= 1;
   return defined === 0;
+}
+
+function hasOwn(object: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
 }

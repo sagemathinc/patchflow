@@ -244,9 +244,8 @@ describe("previewCommit", () => {
     expect(p1.meta).toEqual({ n: 1, nested: { list: [1, 2] } });
     expect(p2.meta).toEqual({ n: 1, nested: { list: [1, 2, 3] } });
     const measured = json(p2);
-    expect(() => s.commit(doc("x\ny\n"), { meta, preview: p1 })).toThrow(
-      /differs from its preview/,
-    );
+    // p2 ended p1.
+    expect(() => s.commit(doc("x\ny\n"), { meta, preview: p1 })).toThrow(/out of date/);
     const committed = s.commit(doc("x\ny\n"), { meta, preview: p2 });
     // The caller's object is not what was stored, and changing it now
     // changes nothing stored.
@@ -384,5 +383,237 @@ describe("previewCommit", () => {
       return counts;
     };
     expect(await run(true)).toEqual(await run(false));
+  });
+
+  it("one active preview: a newer one ends and releases the older", async () => {
+    const { clock } = fixedClock();
+    const { s, store } = await session("a", { clock });
+    s.commit(doc("x\n"));
+    // The session's own copies of the previews it still holds.
+    const held = () => {
+      const active = (s as any).activePreview;
+      return active == null ? [] : [active.preview.envelope];
+    };
+    const p1 = s.previewCommit(doc("x\ny\n"));
+    const own1 = held()[0];
+    expect(own1).toBeDefined();
+    const p2 = s.previewCommit(doc("x\nz\n"));
+    expect(held()).toHaveLength(1);
+    expect(held()[0]).not.toBe(own1);
+    const before = state(s, store);
+    expect(() => s.commit(doc("x\ny\n"), { preview: p1 })).toThrow(/out of date/);
+    expect(state(s, store)).toBe(before);
+    // Refusing the ended p1 leaves p2 active.
+    expect(held()).toHaveLength(1);
+    // Many previews in a row hold one envelope.
+    for (let i = 0; i < 100; i++) s.previewCommit(doc(`x\n${i}\n`));
+    expect(held()).toHaveLength(1);
+    expect(() => s.commit(doc("x\nz\n"), { preview: p2 })).toThrow(/out of date/);
+    const last = s.previewCommit(doc("x\nlast\n"));
+    // A refused commit of the active preview ends it too.
+    expect(() => s.commit(doc("x\nOTHER\n"), { preview: last })).toThrow(/differs/);
+    expect(held()).toHaveLength(0);
+    const next = s.previewCommit(doc("x\nlast\n"));
+    expect(json(s.commit(doc("x\nlast\n"), { preview: next }))).toBe(json(next));
+    expect(held()).toHaveLength(0);
+    s.close();
+  });
+
+  it("cancelPreview and close end the active preview; a stale one stays held until then", async () => {
+    const { clock, tick } = fixedClock();
+    const { s: a } = await session("a", { clock });
+    const { s: b } = await session("b", { clock });
+    const e0 = a.commit(doc("x\n"));
+    b.applyRemote(e0);
+    const active = () => (a as any).activePreview;
+
+    let p = a.previewCommit(doc("x\n1\n"));
+    a.cancelPreview(e0); // not the active preview: ignored
+    expect(active()).toBeDefined();
+    a.cancelPreview(p);
+    expect(active()).toBeUndefined();
+    expect(() => a.commit(doc("x\n1\n"), { preview: p })).toThrow(/out of date/);
+
+    a.previewCommit(doc("x\n2\n"));
+    a.cancelPreview();
+    expect(active()).toBeUndefined();
+
+    // Out of date (a plain commit, a remote patch): held, one slot, until
+    // refused at commit.
+    p = a.previewCommit(doc("x\n3\n"));
+    a.commit(doc("x\nplain\n"));
+    tick();
+    a.applyRemote(b.commit(doc("x\nremote\n")));
+    expect(active()?.shown).toBe(p);
+    expect(() => a.commit(doc("x\n3\n"), { preview: p })).toThrow(/out of date/);
+    expect(active()).toBeUndefined();
+
+    a.previewCommit(doc("x\n5\n"));
+    a.close();
+    expect(active()).toBeUndefined();
+    b.close();
+  });
+
+  describe("own keys named like Object.prototype members are kept as data", () => {
+    // A pure JSON codec whose patch is the whole next value: a patch holds
+    // exactly the keys of the document.
+    const jsonCodec: DocCodec = {
+      ...codec,
+      makePatch: (_a, b) => JSON.parse(b.toString()),
+      applyPatch: (_d, p) => doc(JSON.stringify(p)),
+      applyPatchBatch: (d, ps) => (ps.length === 0 ? d : doc(JSON.stringify(ps[ps.length - 1]))),
+    };
+    const texts = [
+      '{"__proto__":null,"v":"new"}',
+      '{"__proto__":{"polluted":true},"v":"new"}',
+      '{"__proto__":"x","v":"new"}',
+      '{"constructor":{"prototype":1},"toString":"t","hasOwnProperty":0,"v":"new"}',
+      '{"nested":{"__proto__":[1,{"__proto__":null}]},"v":"new"}',
+    ];
+    for (const text of texts) {
+      it(`in meta and in the patch: ${text}`, async () => {
+        const store = new MemoryPatchStore([]);
+        const { clock } = fixedClock();
+        const s = new Session({ codec: jsonCodec, patchStore: store, clock, clientId: "a" });
+        await s.init();
+        s.commit(doc('{"v":"old"}'));
+        const meta = JSON.parse(text);
+        const preview = s.previewCommit(doc(text), { meta });
+        const measured = json(preview);
+        // Both the meta and the patch kept every own key.
+        expect(JSON.stringify(preview.meta)).toBe(JSON.stringify(JSON.parse(text)));
+        expect(JSON.stringify(preview.patch)).toBe(JSON.stringify(JSON.parse(text)));
+        expect(JSON.stringify(preview.meta).length).toBe(text.length);
+        const committed = s.commit(doc(text), { meta, preview });
+        expect(json(committed)).toBe(measured);
+        expect(json(lastStored(store))).toBe(measured);
+        expect(s.getDocument().toString()).toBe(text);
+        // A meta without that key is a different commit.
+        const p2 = s.previewCommit(doc(`${text} `), { meta });
+        const { v } = meta;
+        expect(() => s.commit(doc(`${text} `), { meta: { v }, preview: p2 })).toThrow(
+          /differs from its preview/,
+        );
+        expect(({} as any).polluted).toBeUndefined();
+        s.close();
+      });
+    }
+  });
+
+  it("refused after a remote branch that changes only the heads (an interning codec)", async () => {
+    // Equal values are the same object, so the committed document doesn't
+    // change when an older remote no-op branch arrives; nor do the version
+    // counter, the logical time or the user. Only the graph (its heads) does.
+    const interned = new Map<string, StringDocument>();
+    const idoc = (text: string) => {
+      let d = interned.get(text);
+      if (d == null) interned.set(text, (d = doc(text)));
+      return d;
+    };
+    const interning: DocCodec = {
+      ...codec,
+      fromString: (t) => idoc(t),
+      applyPatch: (d, p) => idoc(codec.applyPatch(d, p).toString()),
+      applyPatchBatch: (d, ps) => idoc(codec.applyPatchBatch(d, ps).toString()),
+      merge3: (base, a, b, ancestors) => idoc(codec.merge3!(base, a, b, ancestors).toString()),
+    };
+    const ahead = fixedClock(10_000);
+    const behind = fixedClock(1000);
+    const mk = async (clientId: string, clock: () => number) => {
+      const store = new MemoryPatchStore([]);
+      const s = new Session({ codec: interning, patchStore: store, clock, clientId });
+      await s.init();
+      return s;
+    };
+    const a = await mk("a", ahead.clock);
+    const b = await mk("b", behind.clock);
+    const e1 = a.commit(idoc("x\n"));
+    b.applyRemote(e1);
+    ahead.tick();
+    a.commit(idoc("x\ny\n"));
+    ahead.tick();
+    a.commit(idoc("x\ny\nz\n"));
+    // b, behind, commits a no-op on e1: version 2, older time.
+    const noop = b.commit(idoc("x\n"));
+    const preview = a.previewCommit(idoc("x\ny\nz\nw\n"));
+    const at = (a as any).activePreview.preview.at;
+    a.applyRemote(noop);
+    // Only the graph changed.
+    const now = (a as any).previewState();
+    expect(now.base).toBe(at.base);
+    expect(now.maxVersion).toBe(at.maxVersion);
+    expect(now.lastTimeMs).toBe(at.lastTimeMs);
+    expect(now.userId).toBe(at.userId);
+    expect(now.revision).not.toBe(at.revision);
+    expect(a.getHeads()).toHaveLength(2);
+    expect(() => a.commit(idoc("x\ny\nz\nw\n"), { preview })).toThrow(/out of date/);
+    a.close();
+    b.close();
+  });
+
+  it("refused after commits that failed once the logical time had advanced", async () => {
+    let fail = false;
+    const failing: DocCodec = {
+      ...codec,
+      makePatch: (a, b) => {
+        if (fail) throw new Error("makePatch failed");
+        return codec.makePatch(a, b);
+      },
+    };
+    const store = new MemoryPatchStore([]);
+    const { clock } = fixedClock();
+    const s = new Session({ codec: failing, patchStore: store, clock, clientId: "a" });
+    await s.init();
+    s.commit(doc("x\n"));
+    const preview = s.previewCommit(doc("x\ny\n"));
+    const lastTimeMs = (s as any).lastTimeMs;
+    fail = true;
+    expect(() => s.commit(doc("x\n1\n"))).toThrow(/makePatch failed/);
+    expect(() => s.commit(doc("x\n2\n"))).toThrow(/makePatch failed/);
+    fail = false;
+    expect((s as any).lastTimeMs).toBeGreaterThan(lastTimeMs);
+    const before = state(s, store);
+    // Committing the preview would move the logical time backward.
+    expect(() => s.commit(doc("x\ny\n"), { preview })).toThrow(/out of date/);
+    expect(state(s, store)).toBe(before);
+    s.close();
+  });
+
+  it("refused after an undo when the parents' exact value is unknown", async () => {
+    // As in the inexact test: a session without the history its heads need.
+    const id = legacyPatchId;
+    const patch = (t: number, parents: number[], from: string, to: string): Patch => ({
+      time: id(t),
+      parents: parents.map(id),
+      patch: doc(from).makePatch(doc(to)),
+      hash: hashString(to),
+    });
+    const ps = [
+      patch(1, [], "", "a\nb\nc\n"),
+      patch(2, [1], "a\nb\nc\n", "a\nc\n"),
+      patch(3, [1], "a\nb\nc\n", "a\nB\nc\n"),
+      patch(4, [2, 3], "a\nB\nc\n", "a\nB\nc\nd\n"),
+      patch(5, [4], "a\nB\nc\nd\n", "a\nB\nC!\nd\n"),
+      patch(6, [3], "a\nB\nc\n", "a\nB\n"),
+    ];
+    const snapshot: Patch = { ...ps[3], isSnapshot: true, snapshot: "a\nB\nc\nd\n" };
+    const { clock, tick } = fixedClock(10_000);
+    const { s } = await session("late", { clock, patches: [snapshot, ps[4], ps[5]] });
+    s.commit(doc(`${s.getDocument()}local\n`));
+    tick();
+    const next = doc(`${s.getDocument()}g\n`);
+    const preview = s.previewCommit(next);
+    expect(preview.inexact).toBe(true);
+    const at = (s as any).activePreview.preview.at;
+    s.undo();
+    // Only the document the patch is made against changed.
+    const now = (s as any).previewState();
+    expect(now.revision).toBe(at.revision);
+    expect(now.lastTimeMs).toBe(at.lastTimeMs);
+    expect(now.base).not.toBe(at.base);
+    expect(() => s.commit(next, { preview })).toThrow(/out of date/);
+    // Rightly: the commit it would make now differs from the preview.
+    expect(json(s.previewCommit(next))).not.toBe(json(preview));
+    s.close();
   });
 });
