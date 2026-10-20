@@ -210,4 +210,179 @@ describe("previewCommit", () => {
     expect(state(s, store)).toBe(before);
     s.close();
   });
+
+  it("meta mutated after the preview: the commit is refused, or stores what was previewed", async () => {
+    const { clock } = fixedClock();
+    const { s, store } = await session("a", { clock });
+    s.commit(doc("x\n"));
+    const meta: { [key: string]: any } = { pad: "x" };
+    const preview = s.previewCommit(doc("x\ny\n"), { meta });
+    const measured = json(preview);
+    meta.pad = "x".repeat(10_000);
+    const before = state(s, store);
+    expect(() => s.commit(doc("x\ny\n"), { meta, preview })).toThrow(/differs from its preview/);
+    expect(state(s, store)).toBe(before);
+    // Used once: even with the meta it was previewed with, it is gone.
+    expect(() => s.commit(doc("x\ny\n"), { meta: { pad: "x" }, preview })).toThrow(/out of date/);
+    // A new preview, committed with an equal meta, stores exactly what it
+    // measured.
+    const p2 = s.previewCommit(doc("x\ny\n"), { meta: { pad: "x" } });
+    expect(json(p2)).toBe(measured);
+    expect(json(s.commit(doc("x\ny\n"), { meta: { pad: "x" }, preview: p2 }))).toBe(measured);
+    expect(json(lastStored(store))).toBe(measured);
+    s.close();
+  });
+
+  it("meta shared between calls: each preview keeps the meta it was made with", async () => {
+    const { clock } = fixedClock();
+    const { s, store } = await session("a", { clock });
+    s.commit(doc("x\n"));
+    const meta: { [key: string]: any } = { n: 1, nested: { list: [1, 2] } };
+    const p1 = s.previewCommit(doc("x\ny\n"), { meta });
+    meta.nested.list.push(3);
+    const p2 = s.previewCommit(doc("x\ny\n"), { meta });
+    expect(p1.meta).toEqual({ n: 1, nested: { list: [1, 2] } });
+    expect(p2.meta).toEqual({ n: 1, nested: { list: [1, 2, 3] } });
+    const measured = json(p2);
+    expect(() => s.commit(doc("x\ny\n"), { meta, preview: p1 })).toThrow(
+      /differs from its preview/,
+    );
+    const committed = s.commit(doc("x\ny\n"), { meta, preview: p2 });
+    // The caller's object is not what was stored, and changing it now
+    // changes nothing stored.
+    expect(committed.meta).not.toBe(meta);
+    meta.n = 99;
+    expect(json(lastStored(store))).toBe(measured);
+    s.close();
+  });
+
+  it("the preview handed out is frozen: edits to wall, meta or patch throw", async () => {
+    const { clock } = fixedClock();
+    const { s, store } = await session("a", { clock });
+    s.commit(doc("x\n"));
+    const preview = s.previewCommit(doc("x\ny\n"), { meta: { pad: "x" } });
+    const measured = json(preview);
+    expect(() => {
+      (preview as any).wall = Number.MAX_SAFE_INTEGER;
+    }).toThrow(TypeError);
+    expect(() => {
+      (preview.meta as any).pad = "x".repeat(10_000);
+    }).toThrow(TypeError);
+    expect(() => {
+      (preview.patch as any).push([]);
+    }).toThrow(TypeError);
+    expect(() => {
+      (preview as any).extra = 1;
+    }).toThrow(TypeError);
+    s.commit(doc("x\ny\n"), { meta: { pad: "x" }, preview });
+    expect(json(lastStored(store))).toBe(measured);
+    s.close();
+  });
+
+  it("a binary patch edited after the preview is refused, and nothing is committed", async () => {
+    // A codec whose patches are bytes, which can't be frozen.
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const bytes: DocCodec = {
+      ...codec,
+      makePatch: (a, b) => enc.encode(JSON.stringify(codec.makePatch(a, b))),
+      applyPatch: (d, p) => codec.applyPatch(d, JSON.parse(dec.decode(p as Uint8Array))),
+      applyPatchBatch: (d, ps) =>
+        codec.applyPatchBatch(
+          d,
+          ps.map((p) => JSON.parse(dec.decode(p as Uint8Array))),
+        ),
+    };
+    const store = new MemoryPatchStore([]);
+    const { clock } = fixedClock();
+    const s = new Session({ codec: bytes, patchStore: store, clock, clientId: "a" });
+    await s.init();
+    s.commit(doc("x\n"));
+    const preview = s.previewCommit(doc("x\ny\n"));
+    const original = (preview.patch as Uint8Array).slice();
+    (preview.patch as Uint8Array)[0] ^= 1;
+    const before = state(s, store);
+    expect(() => s.commit(doc("x\ny\n"), { preview })).toThrow(/modified/);
+    expect(state(s, store)).toBe(before);
+    // An unmodified preview stores its own bytes, not the caller's array.
+    const p2 = s.previewCommit(doc("x\ny\n"));
+    expect(Array.from(p2.patch as Uint8Array)).toEqual(Array.from(original));
+    const committed = s.commit(doc("x\ny\n"), { preview: p2 });
+    expect(committed.patch).not.toBe(p2.patch);
+    (p2.patch as Uint8Array)[0] ^= 1;
+    expect(Array.from(lastStored(store).patch as Uint8Array)).toEqual(Array.from(original));
+    s.close();
+  });
+
+  it("reads the clock once to preview and not at all to commit the preview", async () => {
+    let reads = 0;
+    let now = 1000;
+    const clock = () => {
+      reads += 1;
+      return now++;
+    };
+    const { s } = await session("a", { clock });
+    s.commit(doc("x\n"));
+    const r0 = reads;
+    const preview = s.previewCommit(doc("x\ny\n"));
+    expect(reads - r0).toBe(1);
+    s.commit(doc("x\ny\n"), { preview });
+    expect(reads - r0).toBe(1);
+    // A plain commit reads it twice (time and wall), as before.
+    s.commit(doc("x\ny\nz\n"));
+    expect(reads - r0).toBe(3);
+    s.close();
+  });
+
+  it("commit({ preview }) computes nothing again: an 8-head merge costs what a plain commit does", async () => {
+    // The same 8-head merge, committed plainly and through a preview.
+    const run = async (previewed: boolean) => {
+      const counts = { diffs: 0, hashes: 0 };
+      const counting: DocCodec = {
+        ...codec,
+        makePatch: (a, b) => {
+          counts.diffs += 1;
+          return codec.makePatch(a, b);
+        },
+        hash: (d) => {
+          counts.hashes += 1;
+          return hashString(d.toString());
+        },
+      };
+      const { clock, tick } = fixedClock();
+      const mk = async (clientId: string) => {
+        const store = new MemoryPatchStore([]);
+        const s = new Session({ codec: counting, patchStore: store, clock, clientId });
+        await s.init();
+        return s;
+      };
+      const sessions = await Promise.all(["a", "b", "c", "d", "e", "f", "g", "h"].map(mk));
+      const [a] = sessions;
+      const e0 = a.commit(doc("0\n"));
+      for (const t of sessions.slice(1)) t.applyRemote(e0);
+      tick();
+      const heads = sessions.map((t, i) => t.commit(doc(`0\n${"line\n".repeat(i)}${i}\n`)));
+      for (const e of heads.slice(1)) a.applyRemote(e);
+      expect(a.getHeads()).toHaveLength(8);
+      tick();
+      const next = doc(`${a.getDocument()}merged\n`);
+      counts.diffs = 0;
+      counts.hashes = 0;
+      let envelope: PatchEnvelope;
+      if (previewed) {
+        const preview = a.previewCommit(next);
+        // One patch and 8 candidate merge diffs, all in the preview.
+        expect(counts.diffs).toBe(9);
+        const diffs = counts.diffs;
+        envelope = a.commit(next, { preview });
+        expect(counts.diffs).toBe(diffs);
+      } else {
+        envelope = a.commit(next);
+      }
+      expect(envelope.mergePatch).toBeDefined();
+      for (const t of sessions) t.close();
+      return counts;
+    };
+    expect(await run(true)).toEqual(await run(false));
+  });
 });
