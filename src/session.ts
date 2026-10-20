@@ -55,6 +55,11 @@ export class Session extends EventEmitter {
   private readonly codec: DocCodec;
   private readonly patchStore: PatchStore;
   private readonly clock: () => number;
+  // What each previewed envelope was computed against (previewCommit).
+  private readonly previewedAt = new WeakMap<
+    PatchEnvelope,
+    { timeMs: number; revision: number; lastTimeMs: number }
+  >();
   private readonly graph: PatchGraph;
   private readonly fileAdapter?: FileAdapter;
   private readonly presenceAdapter?: PresenceAdapter;
@@ -337,41 +342,53 @@ export class Session extends EventEmitter {
   }
 
   // Apply local change as a patch, persist, and publish presence.
+  //
+  // opts.preview: an envelope previewCommit returned for this same nextDoc
+  // and opts, with nothing committed or merged since. The commit then uses
+  // its time and wall, so the committed envelope is exactly the one
+  // previewed (a host that measured it before committing commits what it
+  // measured). Throws if anything changed since the preview.
   commit(
     nextDoc: Document,
-    opts: { file?: boolean; source?: string; meta?: PatchEnvelope["meta"] } = {},
+    opts: {
+      file?: boolean;
+      source?: string;
+      meta?: PatchEnvelope["meta"];
+      preview?: PatchEnvelope;
+    } = {},
   ): PatchEnvelope {
     if (!this.committedDoc) {
       throw new Error("session not initialized");
     }
     this.assertValueAvailable();
-    const parents = this.graph.getValueHeads();
-    // With exact values, make the patch against the exact value of its
-    // parents, which is what every client applies it to; then the history
-    // records exactly nextDoc. (The committed document can differ from it,
-    // e.g. after undo, which hides patches that are still parents.)
-    const parentsValue = this.graph.exactValueOf(parents);
-    const base = parentsValue ?? this.workingCopy?.base ?? this.committedDoc;
-    const patch = this.codec.makePatch(base, nextDoc);
-    const timeMs = this.nextTimeMs();
-    const time = encodePatchId(timeMs, this.clientId);
-    const nextVersion = Math.max(this.maxVersion + 1, this.graph.versions().length + 1);
-    const envelope: PatchEnvelope = {
-      time,
-      wall: this.clock(),
-      patch,
-      parents,
-      userId: this.userId,
-      version: nextVersion,
-      file: opts.file,
-      source: opts.source,
-      meta: opts.meta,
-      hash: parentsValue == null ? undefined : this.graph.hashOf(nextDoc),
-      ...this.inexactMarker(parentsValue),
-      ...this.recordMerge(parents, parentsValue),
-    };
+    let timeMs: number;
+    let wall: number;
+    const preview = opts.preview;
+    if (preview != null) {
+      const at = this.previewedAt.get(preview);
+      if (
+        at == null ||
+        at.revision !== this.graph.revision() ||
+        at.lastTimeMs !== this.lastTimeMs
+      ) {
+        throw new Error("the previewed commit is out of date");
+      }
+      timeMs = at.timeMs;
+      wall = preview.wall!;
+    } else {
+      timeMs = this.nextTimeMs();
+      wall = this.clock();
+    }
+    const envelope = this.buildEnvelope(nextDoc, opts, timeMs, wall);
+    if (preview != null) {
+      if (!sameEnvelope(envelope, preview)) {
+        throw new Error("the commit differs from its preview");
+      }
+      this.lastTimeMs = timeMs;
+    }
+    const { time, version: nextVersion } = envelope;
     this.graph.add([envelope]);
-    this.maxVersion = Math.max(this.maxVersion, nextVersion);
+    this.maxVersion = Math.max(this.maxVersion, nextVersion!);
     this.committedDoc = nextDoc;
     this.doc = nextDoc;
     this.workingCopy = undefined;
@@ -384,6 +401,60 @@ export class Session extends EventEmitter {
     // Optionally publish presence after commit
     this.presenceAdapter?.publish({ userId: this.userId, time });
     return envelope;
+  }
+
+  // The envelope commit(nextDoc, opts) would append now, changing nothing:
+  // not the graph, the document, the clock or undo. Pass it to commit as
+  // opts.preview to commit exactly it.
+  previewCommit(
+    nextDoc: Document,
+    opts: { file?: boolean; source?: string; meta?: PatchEnvelope["meta"] } = {},
+  ): PatchEnvelope {
+    if (!this.committedDoc) {
+      throw new Error("session not initialized");
+    }
+    this.assertValueAvailable();
+    const timeMs = Math.max(this.clock(), this.lastTimeMs + 1);
+    const envelope = this.buildEnvelope(nextDoc, opts, timeMs, this.clock());
+    this.previewedAt.set(envelope, {
+      timeMs,
+      revision: this.graph.revision(),
+      lastTimeMs: this.lastTimeMs,
+    });
+    return envelope;
+  }
+
+  // The envelope of a commit of nextDoc at this time.
+  private buildEnvelope(
+    nextDoc: Document,
+    opts: { file?: boolean; source?: string; meta?: PatchEnvelope["meta"] },
+    timeMs: number,
+    wall: number,
+  ): PatchEnvelope {
+    const parents = this.graph.getValueHeads();
+    // With exact values, make the patch against the exact value of its
+    // parents, which is what every client applies it to; then the history
+    // records exactly nextDoc. (The committed document can differ from it,
+    // e.g. after undo, which hides patches that are still parents.)
+    const parentsValue = this.graph.exactValueOf(parents);
+    const base = parentsValue ?? this.workingCopy?.base ?? this.committedDoc!;
+    const patch = this.codec.makePatch(base, nextDoc);
+    const time = encodePatchId(timeMs, this.clientId);
+    const nextVersion = Math.max(this.maxVersion + 1, this.graph.versions().length + 1);
+    return {
+      time,
+      wall,
+      patch,
+      parents,
+      userId: this.userId,
+      version: nextVersion,
+      file: opts.file,
+      source: opts.source,
+      meta: opts.meta,
+      hash: parentsValue == null ? undefined : this.graph.hashOf(nextDoc),
+      ...this.inexactMarker(parentsValue),
+      ...this.recordMerge(parents, parentsValue),
+    };
   }
 
   // For a patch with several parents, the merged value of its parents as a
@@ -805,4 +876,10 @@ export class Session extends EventEmitter {
     }
     this.flushingFile = false;
   }
+}
+
+// Two envelopes are the same commit: the same fields, compared as JSON (they
+// hold only JSON values).
+function sameEnvelope(a: PatchEnvelope, b: PatchEnvelope): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
