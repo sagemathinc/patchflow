@@ -38,8 +38,9 @@ export type SessionOptions = {
 };
 
 // Parents considered as the one a merge commit records its merged value from
-// (see Session.recordMerge): each costs a diff.
-const MAX_MERGE_PARENT_CANDIDATES = 8;
+// (see Session.recordMerge): each costs a full diff of the merged value, so
+// a merge of many heads does at most this many, plus its own patch.
+const MAX_MERGE_PARENT_CANDIDATES = 2;
 
 // Rough size of a patch, to compare patches of the same codec.
 function patchSize(patch: unknown): number {
@@ -539,8 +540,12 @@ export class Session extends EventEmitter {
 
   // For a patch with several parents, the merged value of its parents as a
   // diff from one of them (see Patch.mergeParent), so its value never depends
-  // on how a later version merges. From the parent with the smallest diff,
-  // usually the one with the most of the merged changes.
+  // on how a later version merges. From the parent with the smallest diff
+  // among the first MAX_MERGE_PARENT_CANDIDATES parents, in their canonical
+  // order (parents are sorted by patch id), the earlier one on a tie: any
+  // parent gives a valid record, so this bounds only the record's size.
+  // Each candidate is a complete diff; readers apply the recorded one and
+  // never choose again.
   private recordMerge(
     parents: string[],
     merged: Document | undefined,
