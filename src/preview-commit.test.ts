@@ -233,6 +233,21 @@ describe("previewCommit", () => {
     s.close();
   });
 
+  it("inherited keys never count: a caller's meta whose prototype changed after the preview still commits the snapshot", async () => {
+    const { clock } = fixedClock();
+    const { s, store } = await session("a", { clock });
+    s.commit(doc("x\n"));
+    const meta: { [key: string]: any } = { nested: { x: 1 } };
+    const preview = s.previewCommit(doc("x\ny\n"), { meta });
+    const measured = json(preview);
+    // Not JSON data: an inherited key, added after the preview.
+    Object.setPrototypeOf(meta.nested, { ignored: "not JSON data" });
+    expect(meta.nested.ignored).toBe("not JSON data");
+    s.commit(doc("x\ny\n"), { meta, preview });
+    expect(json(lastStored(store))).toBe(measured);
+    s.close();
+  });
+
   it("meta shared between calls: each preview keeps the meta it was made with", async () => {
     const { clock } = fixedClock();
     const { s, store } = await session("a", { clock });
