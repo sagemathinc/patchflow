@@ -2,8 +2,15 @@ import { DiffMatchPatch, PatchObject } from "@cocalc/diff-match-patch";
 
 export type CompressedPatch = [[-1 | 0 | 1, string][], number, number, number, number][];
 
+// A diff (and so a patch) is cut off by a deterministic work budget, never by
+// the clock: the same two texts give the same patch on any machine, however
+// fast or loaded (diffTimeout = 0.2 made a commit's patch, and its size,
+// depend on the machine). 25M units take about 0.2 s on V8 on an AMD EPYC
+// core (@cocalc/diff-match-patch README): measured there, not guaranteed.
+export const DIFF_WORK_LIMIT = 25_000_000;
+
 const dmp = new DiffMatchPatch();
-dmp.diffTimeout = 0.2;
+dmp.diffWorkLimit = DIFF_WORK_LIMIT;
 
 export const diffMain = dmp.diff_main.bind(dmp);
 export const patchMake = dmp.patch_make.bind(dmp);
