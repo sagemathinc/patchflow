@@ -24,8 +24,8 @@ importers:
   .:
     dependencies:
       '@cocalc/diff-match-patch':
-        specifier: ^1.0.0
-        version: 1.0.1
+        specifier: ^1.1.0
+        version: 1.1.0
       events:
         specifier: ^3.3.0
         version: 3.3.0
@@ -148,8 +148,8 @@ packages:
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@cocalc/diff-match-patch@1.0.1':
-    resolution: {integrity: sha512-sF55A4FvQLSA3GukGjlprMkAYvD89Q2HbqmAI1Pannqa1BePjhKkGIAM2DTMu+v/UHDjJJNgP7AxUQcMOc/gBg==}
+  '@cocalc/diff-match-patch@1.1.0':
+    resolution: {integrity: sha512-eRk0KlDGL6/NzJskY6xbRqGnHSuG7alAUQp+Qtd4vs65bLeIn4IMLJb/RT7PZozNL0KR5u3PxRIdDm7tzAGN4g==}
 
   '@cspotcode/source-map-support@0.8.1':
     resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
@@ -1244,7 +1244,7 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@cocalc/diff-match-patch@1.0.1': {}
+  '@cocalc/diff-match-patch@1.1.0': {}
 
   '@cspotcode/source-map-support@0.8.1':
     dependencies:
