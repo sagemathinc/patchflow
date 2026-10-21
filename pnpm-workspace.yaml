@@ -1,6 +1,11 @@
 packages:
   - "."
 
+# @cocalc/diff-match-patch is our own package (published by us via npm
+# trusted publishing), so the new-release age guard does not apply to it.
+minimumReleaseAgeExclude:
+  - "@cocalc/diff-match-patch"
+
 overrides:
   "ajv@>=6.0.0 <6.14.0": ">=6.14.0 <7"
   "baseline-browser-mapping@>=2.0.0 <2.11.0": ">=2.11.0 <3"
