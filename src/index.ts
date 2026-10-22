@@ -25,3 +25,4 @@ export type {
 } from "./db-document-immer";
 export * as dbDocumentImmer from "./db-document-immer";
 export * from "./client-id";
+export * from "./compact-history";

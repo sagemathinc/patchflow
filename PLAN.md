@@ -1,5 +1,14 @@
 # Patchflow Plans
 
+## (done) History compaction
+
+`compactHistory` (src/compact-history.ts, README "History compaction"): retention policies (keepAll, keepSince, uniform, tiered, latestOnly, union) that keep chosen versions exactly, with property and fuzz tests and `pnpm bench:compact`.
+
+Follow-ups:
+
+- [ ] Diffs of large texts: with `@cocalc/diff-match-patch` 1.1.0 and `DIFF_WORK_LIMIT` 25M, a one-line edit to a text of about 800 KB or more gives a patch that replaces the whole text (charges like `2 * (len1 + len2)` before the common prefix and suffix are removed). This affects every commit to such a text, and makes compacted diffs over many edits of a large text whole-text replacements.
+- [ ] A compacted diff larger than the value itself could store the value instead (a record with `isSnapshot`, `snapshot` and `parents`), once hosts store such records.
+
 ## (done) Optimize patch application for the immer based document type
 
 Currently the implementation of src/db-document-immer.ts is not optimal.  Our goal is to make it much more efficient in terms of speed and memory.
