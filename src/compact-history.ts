@@ -356,6 +356,16 @@ function withoutSnapshot(p: Patch): Patch {
   return rest;
 }
 
+// Without where a record was stored or came from: the stream position of the
+// old history (seqInfo) and the transport (source). The new history is
+// written as a new stream.
+function withoutProvenance(p: Patch): Patch {
+  const { seqInfo: _q, source: _s, ...rest } = p;
+  void _q;
+  void _s;
+  return rest;
+}
+
 class OverBudget extends Error {}
 
 // Diffs done so far, against the budget.
@@ -401,13 +411,13 @@ function buildRecord(opts: {
   if (absorbed.length === 0 && sameParents) {
     // a root snapshot without a patch, as compaction writes them
     if (parents.length === 0 && original.isSnapshot && original.snapshot != null) {
-      if (original.patch == null) return original;
+      if (original.patch == null) return withoutProvenance(original);
     }
     if (
       parents.length === 1 ||
       (parents.length > 1 && original.mergeParent != null && original.mergePatch != null)
     ) {
-      if (original.patch != null) return withoutSnapshot(original);
+      if (original.patch != null) return withoutProvenance(withoutSnapshot(original));
     }
   }
   const meta = squashMeta(old, original, absorbed);
@@ -520,18 +530,23 @@ function ancestorsOf(times: PatchId[], parentsOf: (t: PatchId) => PatchId[]): Se
 // give the compacted history the same merges and so the same newest value.
 function mergeBases(heads: PatchId[], parentsOf: (t: PatchId) => PatchId[]): Set<PatchId> {
   const out = new Set<PatchId>();
+  // Sets already merged: each set of bases is itself merged from its own
+  // bases, also when every member was seen before (in another set).
+  const visited = new Set<string>();
   const visit = (set: PatchId[]) => {
     const sorted = [...new Set(set)].sort(comparePatchId);
     if (sorted.length < 2) return;
+    const key = sorted.join(",");
+    if (visited.has(key)) return;
+    visited.add(key);
     let acc = [sorted[0]];
     for (const t of sorted.slice(1)) {
       const a = ancestorsOf(acc, parentsOf);
       const b = ancestorsOf([t], parentsOf);
       const common = [...a].filter((u) => b.has(u));
       const bases = maximal(common, parentsOf);
-      const fresh = bases.filter((u) => !out.has(u));
       for (const u of bases) out.add(u);
-      if (fresh.length > 0) visit(bases);
+      visit(bases);
       acc = [...acc, t];
     }
   };

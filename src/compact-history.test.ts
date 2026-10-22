@@ -415,6 +415,81 @@ describe("compactHistory fuzz: concurrent histories", () => {
     });
   }
 
+  it("a kept root snapshot starts the new history: no old stream position", () => {
+    const codec = stringCodec;
+    const g = new PatchGraph({ codec });
+    const t = (i: number) => encodePatchId(T0 + i * HOUR, `u${i}`);
+    const root: Patch = {
+      time: t(0),
+      parents: [],
+      userId: 0,
+      isSnapshot: true,
+      snapshot: "a\n",
+      seqInfo: { seq: 500, prevSeq: 400 },
+      source: "persist",
+    };
+    g.add([root]);
+    const commit = (i: number, parent: number, text: string): Patch => {
+      const from = g.exactValueOf([t(parent)])!;
+      const to = codec.fromString(text);
+      const p: Patch = {
+        time: t(i),
+        parents: [t(parent)],
+        userId: i,
+        patch: codec.makePatch(from, to),
+        hash: g.hashOf(to),
+      };
+      g.add([p]);
+      return p;
+    };
+    // two branches from the root; the first has an edit that is dropped
+    const patches = [
+      root,
+      commit(1, 0, "a\nb\n"),
+      commit(2, 0, "c\na\n"),
+      commit(3, 1, "a\nb\nd\n"),
+    ];
+    const result = checkInvariants(codec, patches, { kind: "latestOnly" }, T0);
+    expect(result.stats.identity).toBe(false);
+    expect(result.versions).toEqual([t(0), t(2), t(3)]);
+    expect(result.patches[0].time).toBe(t(0));
+    expect(result.patches[0].isSnapshot).toBe(true);
+    expect(result.patches[0].seqInfo).toBeUndefined();
+    expect(result.patches[0].source).toBeUndefined();
+  });
+
+  it("follows every set of merge bases, also one of bases seen before", () => {
+    // (@review) heads 4, 5, 6, 7 merge from bases 2 and 3, which merge from
+    // base 1: 1 must be kept, 0 need not be.
+    const codec = stringCodec;
+    const parentsOf = [[], [0], [1], [1], [3], [2, 3], [1, 2], [1, 2, 3]];
+    const t = (i: number) => encodePatchId(T0 + i * HOUR, `u${i}`);
+    const g = new PatchGraph({ codec });
+    const patches: Patch[] = [];
+    parentsOf.forEach((ps, i) => {
+      const parents = ps.map(t);
+      const from = parents.length ? g.exactValueOf(parents)! : codec.fromString("");
+      const to = codec.fromString(`${from.toString()}line ${i}\n`);
+      const p: Patch = {
+        time: t(i),
+        parents,
+        userId: i % 3,
+        patch: codec.makePatch(from, to),
+        hash: g.hashOf(to),
+      };
+      if (parents.length > 1) {
+        p.mergeParent = parents[0];
+        p.mergePatch = codec.makePatch(g.exactValueOf([parents[0]])!, from);
+      }
+      g.add([p]);
+      patches.push(p);
+    });
+    expect(g.getHeads()).toEqual([4, 5, 6, 7].map(t));
+    const result = checkInvariants(codec, patches, { kind: "latestOnly" }, T0);
+    expect(result.stats.identity).toBe(false);
+    expect(result.versions).toEqual([1, 2, 3, 4, 5, 6, 7].map(t));
+  });
+
   it("keeps several concurrent heads, merging to the same value", () => {
     for (let seed = 200; seed < 260; seed++) {
       const patches = randomHistory(seed, stringCodec, 30);
