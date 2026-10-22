@@ -78,10 +78,11 @@ The heads, and the merge bases their merged value is computed from, are always k
 
 **Storing a compacted history.** The result replaces the whole history: write it atomically, as a new history, in its order. If `stats.identity` is true, the result is the input as it was stored: write nothing. Every record is a `Patch` as it is given; nothing refers to the records that are dropped, and no record carries a stream position (`seqInfo`) or transport (`source`) of the old history.
 
-- The first record (and any other record with no parents) is a snapshot: `isSnapshot: true`, the full value in `snapshot`, `parents: []`, no `patch`, and `hash`. It is the start of the new history, like the first snapshot of a document; it has no older history to load (no `seqInfo`).
-- Every other record is a patch with `parents` (all earlier in the result), `patch`, `hash`, and for a merge `mergeParent` and `mergePatch`. Its `time` is the original patch id, so ids stay unique and stable, and `userId` and `wall` are those of the original patch.
+- The first record (and any other record with no parents) is a snapshot: `isSnapshot: true`, the full value in `snapshot`, `parents: []` and no `patch`. It is the start of the new history, like the first snapshot of a document; it has no older history to load (no `seqInfo`).
+- Every other record is a patch with `parents` (all earlier in the result) and `patch`, and for a merge `mergeParent` and `mergePatch`. Its `time` is the original patch id, so ids stay unique and stable, and `userId` and `wall` are those of the original patch.
+- Records compaction rewrites (a new snapshot, or a patch whose parents changed or that absorbs dropped patches) carry `hash`. A record kept as it was keeps its own fields, so it has `hash` only if it had one (a patch written before hashes, or marked `inexact`, has none); store `hash` when present.
 - `meta.squashed` (and any other `meta`) must be stored with the record.
-- Snapshot records of the old history are not in the result (a kept patch loses the snapshot text a store attached to it). A host makes snapshots of the new history as for any history, e.g. one of the newest version right away, so that clients do not load it in full.
+- Snapshots of the old history are not carried over, except a root snapshot that is kept as the start of the new history: a kept patch loses the snapshot text a store attached to it. A host makes snapshots of the new history as for any history, e.g. one of the newest version right away, so that clients do not load it in full.
 - A rare repaired record has `isSnapshot` and `snapshot` with `parents` (its value is stored, not diffed): store it like any patch with a snapshot.
 
 ## How Patchflow compares
