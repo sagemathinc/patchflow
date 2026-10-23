@@ -48,3 +48,35 @@ describe("diffs are bounded by work, not the clock", () => {
     }
   });
 });
+
+// Fixed in @cocalc/diff-match-patch 1.1.1.
+describe("a patch keeps every edit", () => {
+  const line = (i: number) => `line ${i}: ` + "abcdefghij".repeat(6) + "\n";
+  function long(bytes: number): string {
+    let s = "";
+    for (let i = 0; s.length < bytes; i++) s += line(i);
+    return s;
+  }
+
+  for (const kb of [800, 2048]) {
+    it(`a one-line edit to ${kb} KB is a patch of the line, not the whole text (0.15)`, () => {
+      const a = long(kb * 1024);
+      const mid = a.indexOf("\n", a.length >> 1) + 1;
+      const b = a.slice(0, mid) + "EDITED " + a.slice(mid);
+      const patch = makePatch(a, b);
+      expect(JSON.stringify(patch).length).toBeLessThan(1000);
+      expect(applyPatch(patch, a)).toEqual([b, true]);
+    });
+  }
+
+  it("an emoji changed only in its high surrogate is not lost (😀 to 🨀)", () => {
+    for (const [a, b] of [
+      ["😀", "🨀"],
+      ["x 😀 y", "x 🨀 y"],
+      ["😀😁", "🨀🨁"],
+      ["p".repeat(400_000) + "😀" + "s".repeat(400_000), "p".repeat(400_000) + "🨀" + "s".repeat(400_000)],
+    ]) {
+      expect(applyPatch(makePatch(a, b), a)).toEqual([b, true]);
+    }
+  });
+});
