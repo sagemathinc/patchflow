@@ -61,6 +61,30 @@ A patch that merges concurrent heads (a merge commit, with several parents) is a
 
 Merge commits written before this (no `mergeParent` and no `hash`) were made by versions that applied every patch in time order (patchflow 0.8 and earlier); their values are computed the same way, from the patches their parents descend from, so the values of such a history do not change either.
 
+### History compaction
+
+`compactHistory({ patches, codec, policy, now, budget })` returns a smaller history that keeps chosen versions exactly (see [src/compact-history.ts](./src/compact-history.ts)). It is pure and deterministic: storing the result is up to the host. A policy chooses the versions to keep:
+
+| Policy                          | Keeps                                                                                                                                    |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ kind: "keepAll" }`           | everything (returns the input)                                                                                                           |
+| `{ kind: "keepSince", since }`  | the version current at `since` and every version after it                                                                                |
+| `{ kind: "uniform", interval }` | the newest version of every `interval` (aligned to the epoch)                                                                            |
+| `{ kind: "tiered", tiers }`     | backup style: every version younger than the first tier, then the newest of each tier's `interval` for versions at least `olderThan` old |
+| `{ kind: "latestOnly" }`        | only the newest version                                                                                                                  |
+| `{ kind: "union", policies }`   | every version any of them keeps                                                                                                          |
+
+The heads, and the merge bases their merged value is computed from, are always kept, so the newest value is unchanged, also with concurrent heads. Every kept version gets its nearest kept ancestors as parents and a diff from their exact value, so its value is exactly what it was; a merge records its merged value (`mergeParent`, `mergePatch`). A kept version without kept ancestors becomes a snapshot, so the result starts with one. A patch that absorbs dropped patches records whose edits it holds in `meta.squashed` (`users` in order, `start`, `end`, `count`). Patches that neither change parents nor absorb anything are kept as they were, so compacting again with the same policy changes nothing. The result is never larger than the input: if it would be, or the `budget` (diffs, and total size of the versions diffed) runs out, the input is returned unchanged (`stats.identity`, `stats.overBudget`). The codec must provide `merge3`, and the history must be complete (starting at a root or a snapshot). The property and fuzz tests in [src/compact-history.test.ts](./src/compact-history.test.ts) check all of this on random concurrent histories of texts and databases; `pnpm bench:compact` measures it on a long history.
+
+**Storing a compacted history.** The result replaces the whole history: write it atomically, as a new history, in its order. If `stats.identity` is true, the result is the input as it was stored: write nothing. Every record is a `Patch` as it is given; nothing refers to the records that are dropped, and no record carries a stream position (`seqInfo`) or transport (`source`) of the old history.
+
+- The first record (and any other record with no parents) is a snapshot: `isSnapshot: true`, the full value in `snapshot`, `parents: []` and no `patch`. It is the start of the new history, like the first snapshot of a document; it has no older history to load (no `seqInfo`).
+- Every other record is a patch with `parents` (all earlier in the result) and `patch`, and for a merge `mergeParent` and `mergePatch`. Its `time` is the original patch id, so ids stay unique and stable, and `userId` and `wall` are those of the original patch.
+- Records compaction rewrites (a new snapshot, or a patch whose parents changed or that absorbs dropped patches) carry `hash`. A record kept as it was keeps its own fields, so it has `hash` only if it had one (a patch written before hashes, or marked `inexact`, has none); store `hash` when present.
+- `meta.squashed` (and any other `meta`) must be stored with the record.
+- Snapshots of the old history are not carried over, except a root snapshot that is kept as the start of the new history: a kept patch loses the snapshot text a store attached to it. A host makes snapshots of the new history as for any history, e.g. one of the newest version right away, so that clients do not load it in full.
+- A rare repaired record has `isSnapshot` and `snapshot` with `parents` (its value is stored, not diffed): store it like any patch with a snapshot.
+
 ## How Patchflow compares
 
 | Approach                     | Examples                                                            | What is exchanged                      | History                                 | Merging                                        |
