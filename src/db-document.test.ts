@@ -105,6 +105,38 @@ describe.each(backends)("%s DbDocument", ({ name, codec }) => {
     expect(toPlain(meta)).toEqual({ a: 1, c: 3 });
   });
 
+  // A map field's key whose value is null (an imported Jupyter notebook's
+  // metadata can have one) stays when another key of the map changes: the
+  // patch carries only what changed, so a peer keeps the null key too.
+  it("leaves an unchanged null-valued map key out of an update's patch", () => {
+    const base = codec().fromString(
+      JSON.stringify({ id: 1, meta: { keep: null, a: 1 } }),
+    ) as unknown as TestDoc;
+    expect(toPlain(getField(base.getOne({ id: 1 }), "meta"))).toEqual({ keep: null, a: 1 });
+
+    const next = base.set({ id: 1, meta: { a: 2 } } as JsMap);
+    expect(toPlain(getField(next.getOne({ id: 1 }), "meta"))).toEqual({ keep: null, a: 2 });
+    const patch = base.makePatch(next);
+    expect(patch).toEqual([1, [{ id: 1, meta: { a: 2 } }]]);
+    const peer = codec().fromString(base.toString()) as unknown as TestDoc;
+    const updated = peer.applyPatch(patch);
+    expect(toPlain(getField(updated.getOne({ id: 1 }), "meta"))).toEqual({ keep: null, a: 2 });
+  });
+
+  it("still sends a removed map key, and a null key that gets a value", () => {
+    const base = codec().fromString(
+      JSON.stringify({ id: 1, meta: { keep: null, a: 1 } }),
+    ) as unknown as TestDoc;
+    const removed = base.set({ id: 1, meta: { a: null } } as JsMap);
+    expect(base.makePatch(removed)).toEqual([1, [{ id: 1, meta: { a: null } }]]);
+    expect(
+      toPlain(getField(base.applyPatch(base.makePatch(removed)).getOne({ id: 1 }), "meta")),
+    ).toEqual({ keep: null });
+
+    const valued = base.set({ id: 1, meta: { keep: 5 } } as JsMap);
+    expect(base.makePatch(valued)).toEqual([1, [{ id: 1, meta: { keep: 5 } }]]);
+  });
+
   if (name === "immer") {
     it("applies map patches without mutating frozen nested objects", () => {
       const empty = newDoc();
