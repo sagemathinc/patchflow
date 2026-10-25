@@ -27,6 +27,10 @@ export function toStr(objs: JsMap[]): string {
   return lines.join("\n");
 }
 
+// The change that turns map obj1 into obj2: changed and added keys with their
+// new values, removed keys as null.  A key of obj1 that is unchanged is left
+// out, even if its value is null: re-sending it as null would delete it from
+// every peer that applies the patch.
 export function mapMergePatch(obj1: JsMap, obj2: JsMap): JsMap {
   const change: JsMap = {};
   for (const key of Object.keys(obj1)) {
@@ -36,7 +40,7 @@ export function mapMergePatch(obj1: JsMap, obj2: JsMap): JsMap {
     change[key] = val2 == null ? null : val2;
   }
   for (const key of Object.keys(obj2)) {
-    if (obj1[key] != null) continue;
+    if (Object.prototype.hasOwnProperty.call(obj1, key)) continue;
     change[key] = obj2[key];
   }
   return change;
